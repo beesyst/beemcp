@@ -1,0 +1,10 @@
+[Unit]
+Description=Bee Dev MCP server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bee/Pro/bee-dev-mcp
+ExecStart=/bin/bash -c 'set -a; source "$HOME/.config/bee-dev-mcp/secrets.env"; exec /home/bee/Pro/bee-dev-mcp/.venv/bin/python server.py'
+Restart=on-failure
+RestartSec=3

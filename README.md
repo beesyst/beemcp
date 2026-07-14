@@ -12,9 +12,9 @@ mv bee-dev-mcp-starter bee-dev-mcp
 cd bee-dev-mcp
 
 chmod +x start.sh setup-secrets.sh create-demo.sh
-uv sync
 ./setup-secrets.sh
 ./create-demo.sh
+./start.sh setup
 ./start.sh
 ```
 
@@ -31,6 +31,63 @@ Secrets are stored outside all repositories:
 ```
 
 The directory is mode `700`; the file is mode `600`.
+
+## Systemd workflow (recommended)
+
+The stack runs as two systemd --user services:
+
+| Service                    | Purpose                |
+|----------------------------|------------------------|
+| `bee-dev-mcp.service`      | FastMCP / MCP server   |
+| `bee-dev-mcp-tunnel.service` | Tunnel / proxy      |
+
+### Initial setup
+
+```bash
+cd /home/bee/Pro/bee-dev-mcp
+chmod +x start.sh setup-secrets.sh create-demo.sh
+
+# One-time secrets bootstrap (interactive — prompts for DeepSeek key)
+./setup-secrets.sh
+
+# (Optional) create demo project
+./create-demo.sh
+
+# Install systemd user units and sync dependencies
+./start.sh setup
+```
+
+`setup` verifies the required programs and both environment files, runs
+`uv sync --frozen`, installs the two user units, and reloads the user manager.
+It does not start or enable either service. After setup, `./start.sh` (or the
+equivalent `./start.sh up`) is the normal way to start the stack.
+
+### Command interface
+
+```bash
+./start.sh up       # start both services (MCP → wait ready → tunnel)
+./start.sh status   # show service status + endpoint health
+./start.sh logs     # follow the combined logs for both services
+./start.sh restart  # stop tunnel → stop MCP → start MCP → wait → start tunnel
+./start.sh stop     # stop tunnel → stop MCP
+./start.sh doctor   # read-only diagnostics (no env output)
+```
+
+### Transition from manual process
+
+Before the first transition, stop any old manually started MCP and tunnel
+processes with Ctrl+C in the terminals where they are running. Once the stack
+has moved to systemd, stop its two services with `./start.sh stop`.
+
+### Health endpoints
+
+| Path       | Status | Body  |
+|------------|--------|-------|
+| `/healthz` | 200    | `live`  |
+| `/readyz`  | 200    | `ready` |
+
+These are unauthenticated custom routes on the FastMCP server. They do not
+affect `/mcp` or any MCP tool auth.
 
 ## Safety boundary
 

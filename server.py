@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 from mcp.server.fastmcp import FastMCP
+from starlette.responses import PlainTextResponse
 
 
 HERE = Path(__file__).resolve().parent
@@ -694,6 +695,21 @@ def discard_run(run_id: str) -> dict[str, Any]:
     shutil.rmtree(run_dir)
     meta_path(run_id).unlink(missing_ok=True)
     return {"run_id": run_id, "discarded": True}
+
+
+# ---------------------------------------------------------------------------
+# Custom HTTP routes (health / readiness — no MCP auth required)
+# ---------------------------------------------------------------------------
+
+
+@mcp.custom_route("/healthz", methods=["GET"])
+async def _healthz(request: Any) -> PlainTextResponse:
+    return PlainTextResponse("live")
+
+
+@mcp.custom_route("/readyz", methods=["GET"])
+async def _readyz(request: Any) -> PlainTextResponse:
+    return PlainTextResponse("ready")
 
 
 if __name__ == "__main__":
