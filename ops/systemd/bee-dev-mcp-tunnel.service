@@ -1,0 +1,11 @@
+[Unit]
+Description=Bee Dev MCP tunnel
+After=bee-dev-mcp.service
+Requires=bee-dev-mcp.service
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/bin/bash -c 'set -a; source "$HOME/.config/bee-dev-mcp/tunnel.env"; exec /usr/bin/env tunnel-client run --profile bee-dev-mcp-test'
+Restart=on-failure
+RestartSec=3
