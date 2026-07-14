@@ -25,5 +25,9 @@ projects:
     base_branch: main
     checks:
       - ["git", "diff", "--check"]
-      - ["python3", "-m", "py_compile", "server.py"]
+      - [
+          "python3",
+          "-c",
+          "from pathlib import Path; compile(Path('server.py').read_text(encoding='utf-8'), 'server.py', 'exec')",
+        ]
       - ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]
