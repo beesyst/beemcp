@@ -4,10 +4,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-server.py.before-*
-
 .env
 .env.*
-!.env.example
 *.pem
 *.key

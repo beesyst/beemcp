@@ -1,705 +1,862 @@
 from __future__ import annotations
 
 import fnmatch
-import hmac
-import json
 import os
-import re
-import shutil
 import subprocess
-import threading
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
 import yaml
-from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.responses import PlainTextResponse
+from mcp.server.fastmcp import FastMCP
 
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("BEE_MCP_CONFIG", HERE / "projects.yml")).expanduser()
-ACCESS_TOKEN = os.environ.get("BEE_MCP_TOKEN", "")
-RUN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,120}$")
-JOBS: dict[str, dict[str, Any]] = {}
-JOBS_LOCK = threading.Lock()
+READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+
+
+def _check_relative_path(value: Any, label: str) -> None:
+    if not isinstance(value, str):
+        raise RuntimeError(f"{label} must be a string, got {type(value).__name__}")
+    if not value:
+        raise RuntimeError(f"{label} must not be empty")
+    p = Path(value)
+    if p.is_absolute():
+        raise RuntimeError(f"{label} must be relative, got absolute: {value}")
+    if ".." in p.parts:
+        raise RuntimeError(f"{label} must not contain '..': {value}")
 
 
 def load_config() -> dict[str, Any]:
     if not CONFIG_PATH.is_file():
         raise RuntimeError(f"Config not found: {CONFIG_PATH}")
-    data = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
-    if not isinstance(data.get("projects"), dict):
-        raise RuntimeError("projects.yml must contain a projects mapping")
-    return data
+    raw = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise RuntimeError("projects.yml must be a mapping")
+
+    limits = raw.get("limits")
+    if not isinstance(limits, dict):
+        raise RuntimeError("projects.yml must contain limits mapping")
+    for key in ("max_file_bytes", "max_diff_chars", "max_context_chars",
+                 "max_tree_entries", "max_search_results"):
+        val = limits.get(key)
+        if not isinstance(val, int) or val <= 0:
+            raise RuntimeError(f"limits.{key} must be a positive integer, got {val!r}")
+
+    deny = raw.get("deny_paths")
+    if not isinstance(deny, list) or not all(isinstance(d, str) for d in deny):
+        raise RuntimeError("deny_paths must be a list of strings")
+
+    projects = raw.get("projects")
+    if not isinstance(projects, dict) or not projects:
+        raise RuntimeError("projects must be a non-empty mapping")
+
+    for name, cfg in projects.items():
+        if not isinstance(cfg, dict):
+            raise RuntimeError(f"project {name!r}: must be a mapping")
+
+        source_raw = cfg.get("source")
+        if not isinstance(source_raw, str):
+            raise RuntimeError(f"project {name!r}: source must be a string")
+        source = Path(source_raw).expanduser().resolve()
+        if not source.is_dir() or not (source / ".git").is_dir():
+            raise RuntimeError(f"project {name!r}: source is not a Git repository: {source}")
+
+        base_branch = cfg.get("base_branch")
+        if not isinstance(base_branch, str) or not base_branch:
+            raise RuntimeError(f"project {name!r}: base_branch must be a non-empty string")
+        try:
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "refs/heads/" + base_branch],
+                cwd=source,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                f"project {name!r}: base_branch {base_branch!r} does not exist in {source}"
+            )
+
+        modes = cfg.get("context_modes")
+        if not isinstance(modes, dict):
+            raise RuntimeError(f"project {name!r}: context_modes must be a mapping")
+
+        mode_names = set()
+        for mname, mcfg in modes.items():
+            if not isinstance(mcfg, dict):
+                raise RuntimeError(f"project {name!r}: mode {mname!r} must be a mapping")
+            if mname in mode_names:
+                raise RuntimeError(f"project {name!r}: duplicate mode name {mname!r}")
+            mode_names.add(mname)
+
+            for key in ("files", "tree_roots"):
+                items = mcfg.get(key)
+                if items is not None:
+                    if not isinstance(items, list) or not all(
+                        isinstance(i, str) for i in items
+                    ):
+                        raise RuntimeError(
+                            f"project {name!r}: mode {mname!r}.{key} must be a list of strings"
+                        )
+                    for item in items:
+                        _check_relative_path(item, f"project {name!r}: mode {mname!r}.{key} item")
+
+        for mname, mcfg in modes.items():
+            ext = mcfg.get("extends")
+            if ext is not None:
+                if not isinstance(ext, str) or ext not in modes:
+                    raise RuntimeError(
+                        f"project {name!r}: mode {mname!r} extends non-existent mode {ext!r}"
+                    )
+
+        for mname in modes:
+            seen = set()
+            current = mname
+            while current in modes:
+                if current in seen:
+                    raise RuntimeError(
+                        f"project {name!r}: cycle in extends for mode {mname!r}"
+                    )
+                seen.add(current)
+                current = modes[current].get("extends")
+
+        related_list = cfg.get("related")
+        if related_list is not None:
+            if not isinstance(related_list, list):
+                raise RuntimeError(f"project {name!r}: related must be a list")
+            for ritem in related_list:
+                if not isinstance(ritem, dict):
+                    raise RuntimeError(f"project {name!r}: related item must be a mapping")
+                rproj = ritem.get("project")
+                if not isinstance(rproj, str) or rproj not in projects:
+                    raise RuntimeError(
+                        f"project {name!r}: related project {rproj!r} not in projects"
+                    )
+                rfiles = ritem.get("files")
+                if not isinstance(rfiles, list):
+                    raise RuntimeError(f"project {name!r}: related files must be a list")
+                for rf in rfiles:
+                    _check_relative_path(rf, f"project {name!r}: related file")
+
+    return raw
 
 
 CONFIG = load_config()
-RUN_ROOT = Path(CONFIG.get("run_root", "~/agent-runs")).expanduser().resolve()
-STATE_ROOT = RUN_ROOT / ".bee-dev-mcp"
-RUN_META_ROOT = STATE_ROOT / "runs"
-JOB_ROOT = STATE_ROOT / "jobs"
-RUN_META_ROOT.mkdir(parents=True, exist_ok=True)
-JOB_ROOT.mkdir(parents=True, exist_ok=True)
+LIMITS: dict[str, int] = CONFIG["limits"]
+DENY_PATTERNS: list[str] = CONFIG["deny_paths"]
+PROJECTS: dict[str, Any] = CONFIG["projects"]
 
 mcp = FastMCP(
-    name="Bee Dev Orchestrator",
+    name="Bee Dev Read-Only Review",
     instructions=(
-        "Use one allowlisted project per run. The first implementation must use "
-        "start_copilot_initial. Later corrections must use start_codex_fix. "
-        "Never claim approval without calling get_diff, read_changed_file as needed, "
-        "and run_checks. This server cannot commit, push, merge, deploy, or access GitHub."
+        "This server provides read-only access to allowlisted Git repositories. "
+        "All tools are read-only: no files are modified, no agents or checks are "
+        "started, and no Git write operations are performed.\n\n"
+        "Before providing an architecture or review answer, call get_project_context "
+        "to load the configured project files for the chosen mode. "
+        "Before final review, call get_review_bundle to obtain the current diff and "
+        "changed file contents.\n\n"
+        "Available tools:\n"
+        "- list_projects: show allowlisted projects and their context modes\n"
+        "- list_worktrees: discover Git worktrees for a project\n"
+        "- get_project_context: read configured files for a target and mode\n"
+        "- get_review_bundle: get diff, changed files, and context for review\n"
+        "- read_project_file: read a single file by relative path\n"
+        "- search_project: fixed-string search within configured boundaries"
     ),
     host="127.0.0.1",
     port=8000,
 )
 
 
-def require_token(token: str) -> None:
-    if not ACCESS_TOKEN:
-        raise RuntimeError("BEE_MCP_TOKEN is not configured on the server")
-    if not hmac.compare_digest(token, ACCESS_TOKEN):
-        raise PermissionError("Invalid access token")
-
-
-def clean_env() -> dict[str, str]:
-    """Return a child environment with credentials removed."""
-    env = dict(os.environ)
-    sensitive_markers = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY")
-    for key in list(env):
-        if key == "BEE_MCP_TOKEN" or any(marker in key.upper() for marker in sensitive_markers):
-            env.pop(key, None)
-    env["NO_COLOR"] = "1"
-    env["CLICOLOR"] = "0"
-    return env
-
-
-def copilot_env() -> dict[str, str]:
-    """
-    Pass only the explicitly allowlisted BYOK variables to Copilot.
-    The DeepSeek key is never passed to Codex, checks, Git, or MCP tools.
-    """
-    env = clean_env()
-    allowed = (
-        "COPILOT_PROVIDER_TYPE",
-        "COPILOT_PROVIDER_BASE_URL",
-        "COPILOT_PROVIDER_API_KEY",
-        "COPILOT_MODEL",
-        "COPILOT_PROVIDER_MAX_PROMPT_TOKENS",
-        "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS",
-        "COPILOT_OFFLINE",
-    )
-    for key in allowed:
-        value = os.environ.get(key)
-        if value:
-            env[key] = value
-
-    required = (
-        "COPILOT_PROVIDER_BASE_URL",
-        "COPILOT_PROVIDER_API_KEY",
-        "COPILOT_MODEL",
-    )
-    missing = [key for key in required if not env.get(key)]
-    if missing:
-        raise RuntimeError(
-            "Missing Copilot BYOK environment variables: " + ", ".join(missing)
-        )
-    return env
-
-
-def run_cmd(
-    argv: list[str],
-    cwd: Path,
-    timeout: int = 120,
-    *,
-    input_text: str | None = None,
-) -> dict[str, Any]:
+def _run_git(argv: list[str], cwd: Path, timeout: int = 30) -> str:
     try:
         cp = subprocess.run(
             argv,
             cwd=cwd,
-            env=clean_env(),
-            input=input_text,
-            text=True,
             capture_output=True,
+            text=True,
             timeout=timeout,
             check=False,
         )
     except FileNotFoundError as exc:
-        return {"ok": False, "returncode": 127, "stdout": "", "stderr": str(exc)}
-    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"Git executable not found: {exc}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Git command timed out after {timeout}s: {' '.join(argv)}")
+    if cp.returncode != 0:
+        msg = (cp.stderr or cp.stdout or "").strip()
+        raise RuntimeError(f"Git command failed: {' '.join(argv)}: {msg}")
+    return cp.stdout
+
+
+def _is_denied(rel_path: str) -> bool:
+    for pattern in DENY_PATTERNS:
+        if fnmatch.fnmatch(rel_path, pattern):
+            return True
+    return False
+
+
+def _parse_name_status(output: str) -> tuple[list[dict[str, str]], list[str]]:
+    renamed: list[dict[str, str]] = []
+    names: list[str] = []
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        status = parts[0]
+        if status.startswith("R"):
+            if len(parts) >= 3:
+                renamed.append({"from": parts[1], "to": parts[2]})
+                names.append(parts[1])
+                names.append(parts[2])
+        else:
+            names.append(parts[-1])
+    return renamed, names
+
+
+def _resolve_target(target: str) -> dict[str, Any]:
+    project_cfg = PROJECTS.get(target)
+    if project_cfg is not None:
+        source = Path(project_cfg["source"]).expanduser().resolve()
         return {
-            "ok": False,
-            "returncode": 124,
-            "stdout": exc.stdout or "",
-            "stderr": f"Timed out after {timeout}s\n{exc.stderr or ''}",
+            "target": target,
+            "project": target,
+            "root": source,
+            "branch": _run_git(["git", "branch", "--show-current"], source).strip(),
+            "head": _run_git(["git", "rev-parse", "HEAD"], source).strip(),
+            "is_main": True,
+            "dirty": bool(_run_git(["git", "status", "--porcelain"], source).strip()),
         }
-    return {
-        "ok": cp.returncode == 0,
-        "returncode": cp.returncode,
-        "stdout": cp.stdout,
-        "stderr": cp.stderr,
-    }
+
+    candidates: list[dict[str, Any]] = []
+    for pname, pcfg in PROJECTS.items():
+        source = Path(pcfg["source"]).expanduser().resolve()
+        common_dir = _run_git(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            source,
+        ).strip()
+        worktree_out = _run_git(
+            ["git", "worktree", "list", "--porcelain", "-z"],
+            source,
+        )
+        entries = worktree_out.split("\0")
+        i = 0
+        while i < len(entries):
+            line = entries[i].strip()
+            if not line:
+                i += 1
+                continue
+            if line.startswith("worktree "):
+                wt_path = Path(line[len("worktree ") :])
+                wt_branch = ""
+                wt_head = ""
+                i += 1
+                while i < len(entries):
+                    sub = entries[i].strip()
+                    if not sub:
+                        break
+                    if sub.startswith("HEAD "):
+                        wt_head = sub[len("HEAD ") :]
+                    elif sub.startswith("branch "):
+                        ref = sub[len("branch ") :]
+                        if ref.startswith("refs/heads/"):
+                            wt_branch = ref[len("refs/heads/") :]
+                    i += 1
+                try:
+                    wt_common = _run_git(
+                        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                        wt_path,
+                    ).strip()
+                except RuntimeError:
+                    continue
+                if wt_common != common_dir:
+                    continue
+                if wt_path.name == target:
+                    is_dirty = bool(
+                        _run_git(["git", "status", "--porcelain"], wt_path).strip()
+                    )
+                    if candidates:
+                        raise RuntimeError(
+                            f"Ambiguous target {target!r}: found in multiple worktrees"
+                        )
+                    candidates.append(
+                        {
+                            "target": target,
+                            "project": pname,
+                            "root": wt_path,
+                            "branch": wt_branch,
+                            "head": wt_head,
+                            "is_main": False,
+                            "dirty": is_dirty,
+                        }
+                    )
+            else:
+                i += 1
+
+        if source.name == target:
+            is_dirty = bool(
+                _run_git(["git", "status", "--porcelain"], source).strip()
+            )
+            candidate = {
+                "target": target,
+                "project": pname,
+                "root": source,
+                "branch": _run_git(["git", "branch", "--show-current"], source).strip(),
+                "head": _run_git(["git", "rev-parse", "HEAD"], source).strip(),
+                "is_main": True,
+                "dirty": is_dirty,
+            }
+            if candidates:
+                raise RuntimeError(
+                    f"Ambiguous target {target!r}: found in multiple worktrees"
+                )
+            candidates.append(candidate)
+
+    if not candidates:
+        raise ValueError(
+            f"Unknown target: {target!r}. Use list_projects or list_worktrees."
+        )
+    return candidates[0]
 
 
-def project_config(project: str) -> dict[str, Any]:
-    raw = CONFIG["projects"].get(project)
-    if not isinstance(raw, dict):
-        raise ValueError(f"Unknown project: {project}")
-    result = dict(CONFIG.get("defaults") or {})
-    result.update(raw)
-    source = Path(result["source"]).expanduser().resolve()
-    if not (source / ".git").exists():
-        raise ValueError(f"Not a Git repository: {source}")
-    result["source"] = source
+def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
+    if _is_denied(rel):
+        return {"status": "denied", "reason": rel}
+
+    try:
+        resolved = (target_root / rel).resolve(strict=True)
+    except OSError:
+        return {"status": "broken", "reason": rel}
+
+    if not resolved.is_relative_to(target_root):
+        return {"status": "escaping", "reason": f"{rel} resolves outside target root"}
+
+    resolved_rel = str(resolved.relative_to(target_root))
+    if _is_denied(resolved_rel):
+        return {"status": "denied", "reason": resolved_rel}
+
+    if resolved.is_dir():
+        return {"status": "broken", "reason": f"{rel} is a directory"}
+
+    try:
+        data = resolved.read_bytes()
+    except OSError:
+        return {"status": "broken", "reason": rel}
+
+    if b"\x00" in data[:8192]:
+        return {"status": "binary", "reason": rel}
+
+    if len(data) > LIMITS["max_file_bytes"]:
+        return {"status": "oversized", "reason": rel}
+
+    return {"status": "safe", "content": data.decode("utf-8", errors="replace")}
+
+
+def _safe_read_file(target_root: Path, raw_path: str) -> dict[str, Any]:
+    result = _classify_path(target_root, raw_path)
+    if result["status"] != "safe":
+        raise ValueError(f"Cannot read {raw_path}: {result['status']}")
+    return {"path": raw_path, "content": result["content"]}
+
+
+def _mode_files(project_cfg: dict[str, Any], mode: str) -> list[str]:
+    modes = project_cfg.get("context_modes", {})
+    if mode not in modes:
+        raise ValueError(f"Unknown mode: {mode}")
+    collected: list[str] = []
+    seen: set[str] = set()
+    stack = [mode]
+    while stack:
+        current = stack.pop()
+        mcfg = modes[current]
+        ext = mcfg.get("extends")
+        if ext:
+            stack.append(ext)
+        for f in mcfg.get("files", []):
+            if f not in seen:
+                seen.add(f)
+                collected.append(f)
+    return collected
+
+
+def _mode_tree_roots(project_cfg: dict[str, Any], mode: str) -> list[str]:
+    modes = project_cfg.get("context_modes", {})
+    if mode not in modes:
+        raise ValueError(f"Unknown mode: {mode}")
+    collected: list[str] = []
+    seen: set[str] = set()
+    stack = [mode]
+    while stack:
+        current = stack.pop()
+        mcfg = modes[current]
+        ext = mcfg.get("extends")
+        if ext:
+            stack.append(ext)
+        for r in mcfg.get("tree_roots", []):
+            if r not in seen:
+                seen.add(r)
+                collected.append(r)
+    return collected
+
+
+def _read_mode_files(
+    target_root: Path, project_cfg: dict[str, Any], mode: str
+) -> tuple[dict[str, str], list[str]]:
+    files_to_read = _mode_files(project_cfg, mode)
+    contents: dict[str, str] = {}
+    omitted: list[str] = []
+    remaining = LIMITS["max_context_chars"]
+    for rel in files_to_read:
+        if remaining <= 0:
+            omitted.append(rel)
+            continue
+        result = _classify_path(target_root, rel)
+        if result["status"] == "safe":
+            content = result["content"]
+            if len(content) > remaining:
+                omitted.append(rel)
+                continue
+            contents[rel] = content
+            remaining -= len(content)
+        else:
+            omitted.append(rel)
+    return contents, omitted
+
+
+def _read_related(
+    mode: str, project_cfg: dict[str, Any], max_chars: int | None = None
+) -> dict[str, str]:
+    if max_chars is None:
+        max_chars = LIMITS["max_context_chars"]
+    related = project_cfg.get("related", [])
+    result: dict[str, str] = {}
+    remaining = max_chars
+    for ritem in related:
+        rproj = ritem["project"]
+        rpcfg = PROJECTS[rproj]
+        rsource = Path(rpcfg["source"]).expanduser().resolve()
+        for rf in ritem["files"]:
+            if remaining <= 0:
+                break
+            classification = _classify_path(rsource, rf)
+            if classification["status"] != "safe":
+                continue
+            key = f"{rproj}/{rf}"
+            content = classification["content"]
+            if len(content) > remaining:
+                continue
+            result[key] = content
+            remaining -= len(content)
     return result
 
 
-def safe_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return (slug or "task")[:48]
-
-
-def meta_path(run_id: str) -> Path:
-    if not RUN_ID_RE.fullmatch(run_id):
-        raise ValueError("Invalid run_id")
-    return RUN_META_ROOT / f"{run_id}.json"
-
-
-def save_meta(meta: dict[str, Any]) -> None:
-    meta_path(meta["run_id"]).write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-def load_meta(run_id: str) -> dict[str, Any]:
-    path = meta_path(run_id)
-    if not path.is_file():
-        raise ValueError(f"Unknown run_id: {run_id}")
-    meta = json.loads(path.read_text(encoding="utf-8"))
-    run_dir = Path(meta["run_dir"]).resolve()
-    if not run_dir.is_relative_to(RUN_ROOT):
-        raise RuntimeError("Run directory escaped RUN_ROOT")
-    if not (run_dir / ".git").exists():
-        raise RuntimeError("Run repository no longer exists")
-    return meta
-
-
-def changed_files(meta: dict[str, Any]) -> list[str]:
-    run_dir = Path(meta["run_dir"])
-    base = meta["base_commit"]
-    tracked = run_cmd(["git", "diff", "--name-only", base, "--"], run_dir)
-    untracked = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], run_dir)
-    names = set(tracked["stdout"].splitlines()) | set(untracked["stdout"].splitlines())
-    return sorted(name for name in names if name)
-
-
-def current_diff(meta: dict[str, Any]) -> str:
-    run_dir = Path(meta["run_dir"])
-    base = meta["base_commit"]
-    cfg = project_config(meta["project"])
-    limit = int(cfg.get("max_diff_chars", 80000))
-
-    tracked = run_cmd(
-        ["git", "diff", "--no-ext-diff", "--unified=40", base, "--"],
-        run_dir,
-        timeout=120,
-    )["stdout"]
-
-    chunks = [tracked]
-    tracked_names = set(
-        run_cmd(["git", "diff", "--name-only", base, "--"], run_dir)["stdout"].splitlines()
-    )
-    for rel in changed_files(meta):
-        if rel in tracked_names:
+def _build_repository_tree(
+    target_root: Path, tree_roots: list[str], max_entries: int
+) -> list[str]:
+    entries: list[str] = []
+    for root in tree_roots:
+        root_path = target_root / root
+        if not root_path.is_dir():
             continue
-        path = (run_dir / rel).resolve()
-        if not path.is_relative_to(run_dir) or not path.is_file():
-            continue
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        if b"\x00" in data:
-            chunks.append(f"\n[untracked binary file: {rel}]\n")
-            continue
-        text = data.decode("utf-8", errors="replace")
-        chunks.append(
-            f"\ndiff --git a/{rel} b/{rel}\n"
-            f"new file mode 100644\n--- /dev/null\n+++ b/{rel}\n"
-            f"@@ new file @@\n{text}\n"
-        )
-
-    diff = "".join(chunks)
-    if len(diff) > limit:
-        return diff[:limit] + f"\n\n[TRUNCATED at {limit} characters]"
-    return diff
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            dirnames.sort()
+            filenames.sort()
+            rel_dir = Path(dirpath).relative_to(target_root)
+            for f in filenames:
+                rel = str(rel_dir / f)
+                if _is_denied(rel):
+                    continue
+                entries.append(rel)
+                if len(entries) >= max_entries:
+                    return entries
+    return entries
 
 
-def policy_violations(meta: dict[str, Any]) -> list[str]:
-    cfg = project_config(meta["project"])
-    patterns = list(cfg.get("deny_paths") or [])
-    run_dir = Path(meta["run_dir"]).resolve()
-    violations: list[str] = []
-
-    for rel in changed_files(meta):
-        if any(fnmatch.fnmatch(rel, pattern) for pattern in patterns):
-            violations.append(f"forbidden path changed: {rel}")
-        path = run_dir / rel
-        if path.is_symlink():
-            try:
-                target = path.resolve()
-            except OSError:
-                violations.append(f"broken symlink: {rel}")
-                continue
-            if not target.is_relative_to(run_dir):
-                violations.append(f"symlink escapes run directory: {rel} -> {target}")
-
-    head = run_cmd(["git", "rev-parse", "HEAD"], run_dir)["stdout"].strip()
-    branch = run_cmd(["git", "branch", "--show-current"], run_dir)["stdout"].strip()
-    if head != meta["base_commit"]:
-        violations.append("agent created or moved commits; working tree will be normalized")
-    if branch != meta["branch"]:
-        violations.append(f"agent changed branch: {branch!r}")
-
-    return violations
-
-
-def normalize_after_agent(meta: dict[str, Any]) -> list[str]:
-    run_dir = Path(meta["run_dir"])
-    violations = policy_violations(meta)
-
-    head = run_cmd(["git", "rev-parse", "HEAD"], run_dir)["stdout"].strip()
-    if head != meta["base_commit"]:
-        run_cmd(["git", "reset", "--mixed", meta["base_commit"]], run_dir)
-
-    remotes = run_cmd(["git", "remote"], run_dir)["stdout"].splitlines()
-    for remote in remotes:
-        run_cmd(["git", "remote", "remove", remote], run_dir)
-
-    return violations
-
-
-def start_process_job(
-    *,
-    run_id: str,
-    kind: str,
-    argv: list[str],
-    input_text: str | None = None,
-    child_env: dict[str, str] | None = None,
-) -> dict[str, Any]:
-    meta = load_meta(run_id)
-    run_dir = Path(meta["run_dir"])
-
-    with JOBS_LOCK:
-        for job in JOBS.values():
-            if job["run_id"] == run_id and job["proc"].poll() is None:
-                raise RuntimeError(f"Run already has an active job: {job['job_id']}")
-
-        job_id = f"{kind}-{uuid.uuid4().hex[:12]}"
-        job_dir = JOB_ROOT / job_id
-        job_dir.mkdir(parents=True)
-        log_path = job_dir / "output.log"
-        input_path = job_dir / "input.txt"
-        input_path.write_text(input_text or "", encoding="utf-8")
-
-        stdin_handle = input_path.open("r", encoding="utf-8") if input_text is not None else subprocess.DEVNULL
-        output_handle = log_path.open("w", encoding="utf-8")
-
-        proc = subprocess.Popen(
-            argv,
-            cwd=run_dir,
-            env=child_env if child_env is not None else clean_env(),
-            stdin=stdin_handle,
-            stdout=output_handle,
-            stderr=subprocess.STDOUT,
-            text=True,
-            start_new_session=True,
-        )
-        JOBS[job_id] = {
-            "job_id": job_id,
-            "run_id": run_id,
-            "kind": kind,
-            "proc": proc,
-            "stdin_handle": stdin_handle,
-            "output_handle": output_handle,
-            "log_path": str(log_path),
-            "started_at": int(time.time()),
-            "finalized": False,
-        }
-
-    return {"job_id": job_id, "run_id": run_id, "status": "running", "kind": kind}
-
-
-def job_snapshot(job: dict[str, Any]) -> dict[str, Any]:
-    proc: subprocess.Popen[str] = job["proc"]
-    returncode = proc.poll()
-    log_path = Path(job["log_path"])
-    output = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-    tail = output[-12000:]
-
-    if returncode is None:
-        return {
-            "job_id": job["job_id"],
-            "run_id": job["run_id"],
-            "kind": job["kind"],
-            "status": "running",
-            "output_tail": tail,
-        }
-
-    if not job["finalized"]:
-        if job["stdin_handle"] is not subprocess.DEVNULL:
-            job["stdin_handle"].close()
-        job["output_handle"].close()
-        meta = load_meta(job["run_id"])
-        job["violations"] = normalize_after_agent(meta)
-        job["finalized"] = True
-
-    meta = load_meta(job["run_id"])
-    return {
-        "job_id": job["job_id"],
-        "run_id": job["run_id"],
-        "kind": job["kind"],
-        "status": "completed" if returncode == 0 else "failed",
-        "returncode": returncode,
-        "changed_files": changed_files(meta),
-        "policy_violations": job.get("violations", []),
-        "output_tail": tail,
-    }
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-})
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
 def list_projects() -> dict[str, Any]:
-    """List allowlisted projects. Use before selecting a project."""
     items = []
-    for name in sorted(CONFIG["projects"]):
-        cfg = project_config(name)
+    for name in sorted(PROJECTS):
+        pcfg = PROJECTS[name]
+        modes = {}
+        for mname, mcfg in (pcfg.get("context_modes") or {}).items():
+            modes[mname] = {
+                k: v for k, v in mcfg.items() if k in ("files", "tree_roots", "extends")
+            }
+        related_list = pcfg.get("related", [])
+        related_projects = [r["project"] for r in related_list] if related_list else []
         items.append(
             {
                 "project": name,
-                "source": str(cfg["source"]),
-                "base_branch": cfg.get("base_branch", "main"),
-                "checks": cfg.get("checks", []),
+                "base_branch": pcfg.get("base_branch", "main"),
+                "context_modes": modes,
+                "related_projects": related_projects,
             }
         )
     return {"projects": items}
 
 
-@mcp.tool(annotations={
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": False,
-    "openWorldHint": False,
-})
-def prepare_run(project: str, task_name: str) -> dict[str, Any]:
-    """
-    Create an isolated local clone for one task. This never changes the source repository,
-    never keeps a remote, and refuses a dirty source repository.
-    """
-    cfg = project_config(project)
-    source: Path = cfg["source"]
-    base_branch = str(cfg.get("base_branch", "main"))
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def list_worktrees(project: str) -> dict[str, Any]:
+    pcfg = PROJECTS.get(project)
+    if pcfg is None:
+        raise ValueError(f"Unknown project: {project!r}")
+    source = Path(pcfg["source"]).expanduser().resolve()
+    common_dir = _run_git(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        source,
+    ).strip()
 
-    dirty = run_cmd(["git", "status", "--porcelain"], source)
-    if dirty["stdout"].strip():
-        raise RuntimeError("Source repository is dirty; commit/stash changes first")
+    out = _run_git(["git", "worktree", "list", "--porcelain", "-z"], source)
+    worktrees: list[dict[str, Any]] = []
+    entries = out.split("\0")
+    i = 0
+    while i < len(entries):
+        line = entries[i].strip()
+        if not line:
+            i += 1
+            continue
+        if line.startswith("worktree "):
+            wt_path = Path(line[len("worktree ") :])
+            wt_branch = ""
+            wt_head = ""
+            i += 1
+            while i < len(entries):
+                sub = entries[i].strip()
+                if not sub:
+                    break
+                if sub.startswith("HEAD "):
+                    wt_head = sub[len("HEAD ") :]
+                elif sub.startswith("branch "):
+                    ref = sub[len("branch ") :]
+                    if ref.startswith("refs/heads/"):
+                        wt_branch = ref[len("refs/heads/") :]
+                i += 1
 
-    base_result = run_cmd(["git", "rev-parse", base_branch], source)
-    if not base_result["ok"]:
-        raise RuntimeError(base_result["stderr"] or f"Cannot resolve {base_branch}")
-    base_commit = base_result["stdout"].strip()
+            if not wt_path.is_dir():
+                continue
+            try:
+                wt_common = _run_git(
+                    ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                    wt_path,
+                ).strip()
+            except RuntimeError:
+                continue
+            if wt_common != common_dir:
+                continue
 
-    slug = safe_slug(task_name)
-    run_id = f"{project}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
-    run_dir = (RUN_ROOT / project / run_id).resolve()
-    run_dir.parent.mkdir(parents=True, exist_ok=True)
+            is_main = wt_path == source
+            is_dirty = bool(
+                _run_git(["git", "status", "--porcelain"], wt_path).strip()
+            )
+            worktrees.append(
+                {
+                    "target": project if is_main else wt_path.name,
+                    "project": project,
+                    "branch": wt_branch,
+                    "head": wt_head,
+                    "is_main": is_main,
+                    "dirty": is_dirty,
+                }
+            )
+        else:
+            i += 1
 
-    clone = run_cmd(
-        [
-            "git",
-            "clone",
-            "--local",
-            "--no-hardlinks",
-            "--single-branch",
-            "--branch",
-            base_branch,
-            str(source),
-            str(run_dir),
-        ],
-        HERE,
-        timeout=300,
-    )
-    if not clone["ok"]:
-        raise RuntimeError(clone["stderr"] or clone["stdout"])
-
-    run_cmd(["git", "remote", "remove", "origin"], run_dir)
-    branch = f"agent/{slug}-{uuid.uuid4().hex[:6]}"
-    switched = run_cmd(["git", "switch", "-c", branch], run_dir)
-    if not switched["ok"]:
-        shutil.rmtree(run_dir, ignore_errors=True)
-        raise RuntimeError(switched["stderr"] or switched["stdout"])
-
-    meta = {
-        "run_id": run_id,
-        "project": project,
-        "task_name": task_name,
-        "run_dir": str(run_dir),
-        "base_branch": base_branch,
-        "base_commit": base_commit,
-        "branch": branch,
-        "created_at": int(time.time()),
-    }
-    save_meta(meta)
-    return meta
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": False,
-    "openWorldHint": False,
-})
-def start_copilot_initial(
-    run_id: str,
-    issue_text: str,
-) -> dict[str, Any]:
-    """
-    Start the first implementation with Copilot. Copilot can only inspect and edit files
-    in the isolated run; shell, web, GitHub MCP, remote control, commit, push and merge
-    are unavailable.
-    """
-    meta = load_meta(run_id)
-    run_dir = Path(meta["run_dir"])
-
-    prompt = f"""You are the INITIAL IMPLEMENTER for this isolated repository.
-
-Task:
-{issue_text}
-
-Rules:
-- Read AGENTS.md, README files, ROADMAP and relevant docs if present.
-- Implement only the requested scope.
-- Add or update tests where appropriate.
-- Do not use shell commands.
-- Do not access the network.
-- Do not commit, push, create PRs, change branches, or edit Git configuration.
-- Do not read files outside the current repository.
-- Finish with a concise report: changed files, decisions, remaining uncertainty.
-"""
-
-    argv = [
-        "copilot",
-        "-C",
-        str(run_dir),
-        "-p",
-        prompt,
-        "-s",
-        "--no-ask-user",
-        "--disable-builtin-mcps",
-        "--disallow-temp-dir",
-        "--available-tools=view,glob,grep,apply_patch,create,edit",
-        "--allow-tool=read,write",
-        "--deny-tool=shell,url",
-        "--secret-env-vars=COPILOT_PROVIDER_API_KEY",
-        "--output-format=text",
-    ]
-    return start_process_job(
-        run_id=run_id,
-        kind="copilot",
-        argv=argv,
-        child_env=copilot_env(),
-    )
+    return {"project": project, "worktrees": worktrees}
 
 
-@mcp.tool(annotations={
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": False,
-    "openWorldHint": False,
-})
-def start_codex_fix(
-    run_id: str,
-    findings: str,
-) -> dict[str, Any]:
-    """
-    Start a correction pass with Codex after ChatGPT has reviewed the current diff.
-    Codex is restricted to workspace-write with network disabled.
-    """
-    meta = load_meta(run_id)
-    run_dir = Path(meta["run_dir"])
-
-    prompt = f"""You are the CORRECTION IMPLEMENTER.
-
-Apply only these reviewer findings:
-{findings}
-
-Rules:
-- Preserve the original task scope.
-- Inspect the current working tree and relevant tests.
-- Make the minimum correct changes.
-- Network access is forbidden.
-- Do not commit, push, create PRs, change branches, or edit Git configuration.
-- Do not weaken or delete tests merely to make checks pass.
-- Finish with a concise report of fixes and checks attempted.
-"""
-
-    argv = [
-        "codex",
-        "-C",
-        str(run_dir),
-        "--sandbox",
-        "workspace-write",
-        "--ask-for-approval",
-        "never",
-        "-c",
-        "sandbox_workspace_write.network_access=false",
-        "exec",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "-",
-    ]
-    return start_process_job(
-        run_id=run_id,
-        kind="codex",
-        argv=argv,
-        input_text=prompt,
-    )
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-})
-def get_job(job_id: str) -> dict[str, Any]:
-    """Poll an agent job and retrieve its output when complete."""
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if not job:
-            raise ValueError("Unknown job_id or server was restarted")
-        return job_snapshot(job)
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-})
-def get_diff(run_id: str) -> dict[str, Any]:
-    """Return the current diff from the immutable base commit plus changed-file metadata."""
-    meta = load_meta(run_id)
-    return {
-        "run_id": run_id,
-        "base_commit": meta["base_commit"],
-        "changed_files": changed_files(meta),
-        "policy_violations": policy_violations(meta),
-        "diff": current_diff(meta),
-    }
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": True,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-})
-def read_changed_file(run_id: str, path: str) -> dict[str, Any]:
-    """Read one changed text file. Paths outside the isolated run are rejected."""
-    meta = load_meta(run_id)
-    cfg = project_config(meta["project"])
-    run_dir = Path(meta["run_dir"]).resolve()
-
-    rel = Path(path)
-    if rel.is_absolute() or ".." in rel.parts:
-        raise ValueError("Only safe relative paths are allowed")
-    if path not in changed_files(meta):
-        raise ValueError("File is not in the changed-file set")
-
-    target = (run_dir / rel).resolve()
-    if not target.is_relative_to(run_dir) or not target.is_file():
-        raise ValueError("Invalid file path")
-    data = target.read_bytes()
-    limit = int(cfg.get("max_file_bytes", 200000))
-    if len(data) > limit:
-        raise ValueError(f"File exceeds {limit} bytes")
-    if b"\x00" in data:
-        raise ValueError("Binary files are not readable through this tool")
-
-    return {"run_id": run_id, "path": path, "content": data.decode("utf-8", errors="replace")}
-
-
-@mcp.tool(annotations={
-    "readOnlyHint": False,
-    "destructiveHint": False,
-    "idempotentHint": True,
-    "openWorldHint": False,
-})
-def run_checks(run_id: str) -> dict[str, Any]:
-    """
-    Run only project-configured checks. Each check is executed through the Codex Linux
-    OS sandbox; no arbitrary command can be supplied by ChatGPT.
-    """
-    meta = load_meta(run_id)
-    cfg = project_config(meta["project"])
-    run_dir = Path(meta["run_dir"])
-    results = []
-
-    for raw in cfg.get("checks", []):
-        if not isinstance(raw, list) or not raw or not all(isinstance(x, str) for x in raw):
-            raise RuntimeError("Each configured check must be a non-empty argv list")
-        argv = ["codex", "sandbox", "--", *raw]
-        result = run_cmd(argv, run_dir, timeout=900)
-        results.append(
-            {
-                "check": raw,
-                "ok": result["ok"],
-                "returncode": result["returncode"],
-                "stdout_tail": result["stdout"][-8000:],
-                "stderr_tail": result["stderr"][-4000:],
-            }
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_project_context(target: str, mode: str) -> dict[str, Any]:
+    resolved = _resolve_target(target)
+    pcfg = PROJECTS[resolved["project"]]
+    modes = pcfg.get("context_modes", {})
+    if mode not in modes:
+        raise ValueError(
+            f"Unknown mode {mode!r} for project {resolved['project']!r}. "
+            f"Available modes: {', '.join(sorted(modes))}"
         )
 
+    files_content, omitted = _read_mode_files(resolved["root"], pcfg, mode)
+    used = sum(len(v) for v in files_content.values())
+    related_content = _read_related(
+        mode, pcfg, max(0, LIMITS["max_context_chars"] - used)
+    )
+    tree_roots = _mode_tree_roots(pcfg, mode)
+    tree: list[str] = []
+    if tree_roots:
+        tree = _build_repository_tree(resolved["root"], tree_roots, LIMITS["max_tree_entries"])
+
+    result: dict[str, Any] = {
+        "target": target,
+        "project": resolved["project"],
+        "branch": resolved["branch"],
+        "mode": mode,
+        "files": files_content,
+        "related_files": related_content,
+        "omitted_files": omitted,
+    }
+    if tree:
+        result["repository_tree"] = tree
+    return result
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
+    resolved = _resolve_target(target)
+    pcfg = PROJECTS[resolved["project"]]
+    base_branch = pcfg["base_branch"]
+    target_root = resolved["root"]
+
+    modes = pcfg.get("context_modes", {})
+    if mode not in modes:
+        raise ValueError(
+            f"Unknown mode {mode!r} for project {resolved['project']!r}. "
+            f"Available modes: {', '.join(sorted(modes))}"
+        )
+
+    status_out = _run_git(["git", "status", "--porcelain"], target_root)
+
+    # Merge-base: required; failure stops the tool
+    merge_base = _run_git(
+        ["git", "merge-base", "HEAD", base_branch], target_root
+    ).strip()
+
+    # Collect changed file names and renames from all sources
+    branch_renamed, branch_names = _parse_name_status(
+        _run_git(
+            ["git", "diff", "--name-status", merge_base, "HEAD", "--"],
+            target_root,
+        )
+    )
+    staged_renamed, staged_names = _parse_name_status(
+        _run_git(
+            ["git", "diff", "--name-status", "--cached", "--"], target_root
+        )
+    )
+    unstaged_renamed, unstaged_names = _parse_name_status(
+        _run_git(["git", "diff", "--name-status", "--"], target_root)
+    )
+    untracked_names = _run_git(
+        ["git", "ls-files", "--others", "--exclude-standard"], target_root
+    ).splitlines()
+
+    seen_renames: set[tuple[str, str]] = set()
+    renamed_files: list[dict[str, str]] = []
+    for r in branch_renamed + staged_renamed + unstaged_renamed:
+        key = (r["from"], r["to"])
+        if key not in seen_renames:
+            seen_renames.add(key)
+            renamed_files.append(r)
+
+    all_changed: set[str] = set()
+    all_changed.update(branch_names)
+    all_changed.update(staged_names)
+    all_changed.update(unstaged_names)
+    all_changed.update(untracked_names)
+
+    # Deleted files from all sources
+    deleted_out = _run_git(
+        ["git", "diff", "--diff-filter=D", "--name-only", merge_base, "HEAD", "--"],
+        target_root,
+    ).splitlines()
+    staged_del = _run_git(
+        ["git", "diff", "--diff-filter=D", "--name-only", "--cached", "--"],
+        target_root,
+    ).splitlines()
+    unstaged_del = _run_git(
+        ["git", "diff", "--diff-filter=D", "--name-only", "--"], target_root
+    ).splitlines()
+    deleted_files = list(dict.fromkeys(
+        f for f in deleted_out + staged_del + unstaged_del if f
+    ))
+
+    deleted_denied: list[str] = []
+    deleted_safe: list[str] = []
+    for rel in deleted_files:
+        if _is_denied(rel):
+            deleted_denied.append(rel)
+        else:
+            deleted_safe.append(rel)
+
+    safe_paths: set[str] = set()
+    redacted_paths: list[str] = list(deleted_denied)
+    omitted_files: list[str] = []
+    file_contents: dict[str, str] = {}
+
+    for rel in sorted(all_changed):
+        if rel in deleted_files:
+            continue
+        classification = _classify_path(target_root, rel)
+        st = classification["status"]
+        if st == "safe":
+            safe_paths.add(rel)
+            file_contents[rel] = classification["content"]
+        elif st == "denied":
+            redacted_paths.append(rel)
+        elif st == "escaping":
+            redacted_paths.append(f"{rel} [escaping symlink]")
+        elif st in ("binary", "oversized"):
+            omitted_files.append(f"{rel} [{st}]")
+        else:
+            omitted_files.append(rel)
+
+    for r in renamed_files:
+        from_denied = _is_denied(r["from"]) or r["from"] in redacted_paths
+        to_denied = _is_denied(r["to"]) or r["to"] in redacted_paths
+        if from_denied or to_denied:
+            for path in (r["from"], r["to"]):
+                safe_paths.discard(path)
+                file_contents.pop(path, None)
+                if path not in redacted_paths:
+                    redacted_paths.append(path)
+        else:
+            # Ensure both sides appear in diff pathspec for rename detection
+            pass  # handled below
+
+    diff_pathspec_set: set[str] = set(safe_paths) | set(deleted_safe)
+    for r in renamed_files:
+        from_denied = _is_denied(r["from"]) or r["from"] in redacted_paths
+        to_denied = _is_denied(r["to"]) or r["to"] in redacted_paths
+        if not from_denied and not to_denied:
+            diff_pathspec_set.add(r["from"])
+            diff_pathspec_set.add(r["to"])
+    diff_pathspec = sorted(diff_pathspec_set)
+
+    diff_parts: list[str] = []
+
+    if diff_pathspec:
+        branch_diff = _run_git(
+            ["git", "diff", "--no-ext-diff", "--unified=8", merge_base, "HEAD", "--"]
+            + diff_pathspec,
+            target_root,
+        )
+        if branch_diff.strip():
+            diff_parts.append(branch_diff)
+
+        staged_diff = _run_git(
+            ["git", "diff", "--no-ext-diff", "--unified=8", "--cached", "--"]
+            + diff_pathspec,
+            target_root,
+        )
+        if staged_diff.strip():
+            diff_parts.append(staged_diff)
+
+        unstaged_diff = _run_git(
+            ["git", "diff", "--no-ext-diff", "--unified=8", "--"]
+            + diff_pathspec,
+            target_root,
+        )
+        if unstaged_diff.strip():
+            diff_parts.append(unstaged_diff)
+
+    safe_untracked: list[str] = []
+    for f in untracked_names:
+        if not f:
+            continue
+        if f not in safe_paths:
+            continue
+        classification = _classify_path(target_root, f)
+        if classification["status"] != "safe":
+            continue
+        safe_untracked.append(f)
+        diff_parts.append(
+            f"\ndiff --git a/{f} b/{f}\n"
+            f"new file mode 100644\n--- /dev/null\n+++ b/{f}\n"
+            f"@@ new file @@\n{classification['content']}\n"
+        )
+
+    full_diff = "\n".join(d for d in diff_parts if d.strip())
+    if len(full_diff) > LIMITS["max_diff_chars"]:
+        full_diff = (
+            full_diff[: LIMITS["max_diff_chars"]]
+            + f"\n\n[TRUNCATED at {LIMITS['max_diff_chars']} characters]"
+        )
+
+    context, _ = _read_mode_files(target_root, pcfg, mode)
+    used_ctx = sum(len(v) for v in context.values())
+    related_context = _read_related(
+        mode, pcfg, max(0, LIMITS["max_context_chars"] - used_ctx)
+    )
+
     return {
-        "run_id": run_id,
-        "all_passed": bool(results) and all(item["ok"] for item in results),
-        "results": results,
-        "policy_violations": policy_violations(meta),
+        "target": target,
+        "project": resolved["project"],
+        "branch": resolved["branch"],
+        "head": resolved["head"],
+        "base_branch": base_branch,
+        "git_status": status_out.strip(),
+        "changed_files": sorted(all_changed),
+        "deleted_files": deleted_files,
+        "renamed_files": renamed_files,
+        "untracked_files": safe_untracked,
+        "diff": full_diff,
+        "file_contents": file_contents,
+        "redacted_paths": redacted_paths,
+        "omitted_files": omitted_files,
+        "context": context,
+        "related_context": related_context,
     }
 
 
-@mcp.tool(annotations={
-    "readOnlyHint": False,
-    "destructiveHint": True,
-    "idempotentHint": False,
-    "openWorldHint": False,
-})
-def discard_run(run_id: str) -> dict[str, Any]:
-    """Delete only the isolated run directory and its metadata. Source repositories are untouched."""
-    meta = load_meta(run_id)
-    with JOBS_LOCK:
-        for job in JOBS.values():
-            if job["run_id"] == run_id and job["proc"].poll() is None:
-                raise RuntimeError("Cannot discard a run with an active job")
-    run_dir = Path(meta["run_dir"]).resolve()
-    if not run_dir.is_relative_to(RUN_ROOT):
-        raise RuntimeError("Refusing to delete outside RUN_ROOT")
-    shutil.rmtree(run_dir)
-    meta_path(run_id).unlink(missing_ok=True)
-    return {"run_id": run_id, "discarded": True}
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def read_project_file(target: str, path: str) -> dict[str, Any]:
+    resolved = _resolve_target(target)
+    result = _safe_read_file(resolved["root"], path)
+    return {"target": target, "path": result["path"], "content": result["content"]}
 
 
-# ---------------------------------------------------------------------------
-# Custom HTTP routes (health / readiness — no MCP auth required)
-# ---------------------------------------------------------------------------
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def search_project(target: str, query: str, mode: str) -> list[dict[str, Any]]:
+    resolved = _resolve_target(target)
+    pcfg = PROJECTS[resolved["project"]]
+    target_root = resolved["root"]
+
+    modes = pcfg.get("context_modes", {})
+    if mode not in modes:
+        raise ValueError(
+            f"Unknown mode {mode!r} for project {resolved['project']!r}. "
+            f"Available modes: {', '.join(sorted(modes))}"
+        )
+
+    search_paths = _mode_files(pcfg, mode)
+    tree_roots = _mode_tree_roots(pcfg, mode)
+    for root in tree_roots:
+        root_path = target_root / root
+        if not root_path.is_dir():
+            continue
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            dirnames.sort()
+            filenames.sort()
+            rel_dir = Path(dirpath).relative_to(target_root)
+            for f in filenames:
+                rel = str(rel_dir / f)
+                if _is_denied(rel):
+                    continue
+                if rel not in search_paths:
+                    search_paths.append(rel)
+
+    results: list[dict[str, Any]] = []
+    for rel in search_paths:
+        if len(results) >= LIMITS["max_search_results"]:
+            break
+        classification = _classify_path(target_root, rel)
+        if classification["status"] != "safe":
+            continue
+        text = classification["content"]
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if query in line:
+                results.append({"path": rel, "line": lineno, "text": line.rstrip()})
+                if len(results) >= LIMITS["max_search_results"]:
+                    break
+
+    return results
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
