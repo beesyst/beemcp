@@ -1,8 +1,8 @@
 [project]
 name = "bee-dev-mcp"
 version = "0.1.0"
-description = "Minimal safe MCP orchestrator for ChatGPT -> Copilot -> Codex"
-requires-python = ">=3.12"
+description = "Read-only MCP gateway for architectural analysis and code review through ChatGPT"
+requires-python = "==3.14.4"
 dependencies = [
     "mcp[cli]>=1.12",
     "pyyaml>=6.0",

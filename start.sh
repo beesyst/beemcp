@@ -4,7 +4,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_DIR="${HOME}/.config/bee-dev-mcp"
 SYSTEMD_DIR="${HOME}/.config/systemd/user"
-SECRETS_ENV="${CONFIG_DIR}/secrets.env"
 TUNNEL_ENV="${CONFIG_DIR}/tunnel.env"
 MCP_SVC="bee-dev-mcp.service"
 TUNNEL_SVC="bee-dev-mcp-tunnel.service"
@@ -45,7 +44,6 @@ cmd_setup() {
   for command in systemctl journalctl uv curl tunnel-client; do
     require_cmd "$command"
   done
-  require_file "${SECRETS_ENV}"
   require_file "${TUNNEL_ENV}"
   require_file "${SCRIPT_DIR}/ops/systemd/${MCP_SVC}"
   require_file "${SCRIPT_DIR}/ops/systemd/${TUNNEL_SVC}"
@@ -118,7 +116,6 @@ cmd_doctor() {
   for path in "${SYSTEMD_DIR}/${MCP_SVC}" "${SYSTEMD_DIR}/${TUNNEL_SVC}"; do
     [[ -r "$path" ]] || problems+=("installed unit missing: ${path##*/}")
   done
-  [[ -r "${SECRETS_ENV}" ]] || problems+=("required env file missing: secrets.env")
   [[ -r "${TUNNEL_ENV}" ]] || problems+=("required env file missing: tunnel.env")
   systemctl --user show-environment >/dev/null 2>&1 || problems+=("systemd user manager unavailable")
   systemctl --user is-active "${MCP_SVC}" >/dev/null 2>&1 || problems+=("service inactive: ${MCP_SVC}")

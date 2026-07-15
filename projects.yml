@@ -1,33 +1,139 @@
-run_root: /home/bee/agent-runs
-
-defaults:
-  max_diff_chars: 80000
+limits:
   max_file_bytes: 200000
-  deny_paths:
-    - ".env"
-    - ".env.*"
-    - "*.pem"
-    - "*.key"
-    - "id_rsa"
-    - "id_ed25519"
-    - ".github/workflows/**"
+  max_diff_chars: 120000
+  max_context_chars: 160000
+  max_tree_entries: 4000
+  max_search_results: 200
+
+deny_paths:
+  - ".env"
+  - ".env.*"
+  - "**/.env"
+  - "**/.env.*"
+  - "*.pem"
+  - "**/*.pem"
+  - "*.key"
+  - "**/*.key"
+  - "id_rsa"
+  - "**/id_rsa"
+  - "id_ed25519"
+  - "**/id_ed25519"
+  - ".git"
+  - ".git/**"
+  - "**/__pycache__/**"
+  - ".venv/**"
+  - "**/.venv/**"
+  - ".github/workflows/**"
 
 projects:
-  mcp-demo:
-    source: /home/bee/Pro/mcp-demo
-    base_branch: main
-    checks:
-      - ["git", "diff", "--check"]
-      - ["python3", "-m", "unittest", "-q"]
-
   bee-dev-mcp:
     source: /home/bee/Pro/bee-dev-mcp
     base_branch: main
-    checks:
-      - ["git", "diff", "--check"]
-      - [
-          "python3",
-          "-c",
-          "from pathlib import Path; compile(Path('server.py').read_text(encoding='utf-8'), 'server.py', 'exec')",
-        ]
-      - ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]
+    context_modes:
+      A:
+        files:
+          - README.md
+          - server.py
+          - start.sh
+          - pyproject.toml
+      B:
+        extends: A
+        files:
+          - .gitignore
+          - ops/systemd/bee-dev-mcp.service
+          - ops/systemd/bee-dev-mcp-tunnel.service
+      C:
+        extends: B
+        tree_roots:
+          - ops
+          - tests
+
+  beeagent:
+    source: /home/bee/Pro/beeagent
+    base_branch: main
+    context_modes:
+      A:
+        files:
+          - README.ru.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/DEV_GUIDE.md
+          - .github/ISSUE_TEMPLATE/issue.md
+          - .github/PULL_REQUEST_TEMPLATE/pr.md
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - config/start.py
+          - config/settings.yml
+          - src/beeagent_module/core/settings.py
+          - src/beeagent_module/core/app.py
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+          - config
+          - docs
+    related:
+      - project: beeagent-rop
+        files:
+          - docs/ROADMAP.md
+
+  beeagent-rop:
+    source: /home/bee/Pro/beeagent-rop
+    base_branch: main
+    context_modes:
+      A:
+        files:
+          - README.ru.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/SPEC.md
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - docs/DEV_GUIDE.md
+          - docs/ARCHITECTURE.md
+          - docs/CONTRIBUTING.md
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - config
+          - docs
+    related:
+      - project: beeagent
+        files:
+          - docs/ROADMAP.md
+
+  beeui:
+    source: /home/bee/Pro/beeui
+    base_branch: main
+    context_modes:
+      A:
+        files:
+          - README.ru.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/SPEC.md
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - config/start.py
+          - config/settings.yml
+          - docs/ARCHITECTURE.md
+          - docs/API_CONTRACT.md
+          - docs/DEV_GUIDE.md
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - config
+          - docs
+          - tests

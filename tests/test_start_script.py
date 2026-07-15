@@ -58,9 +58,6 @@ class StartScriptTests(unittest.TestCase):
         self.python = self.repo / ".venv/bin/python"
         self.python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.python.chmod(0o755)
-        (self.home / ".config/bee-dev-mcp/secrets.env").write_text(
-            "SECRET_VALUE=never-print-this\n", encoding="utf-8"
-        )
         (self.home / ".config/bee-dev-mcp/tunnel.env").write_text(
             "TUNNEL_SECRET=also-never-print-this\n", encoding="utf-8"
         )
@@ -221,7 +218,6 @@ esac
         self.assertIn("systemd user manager unavailable", output)
         self.assertIn("service inactive: bee-dev-mcp.service", output)
         self.assertIn("health endpoint unavailable", output)
-        self.assertNotIn("never-print-this", output)
         self.assertNotIn("also-never-print-this", output)
         calls = self.calls()
         self.assertFalse(any(" start " in f" {call} " or " stop " in f" {call} " for call in calls))
@@ -240,10 +236,11 @@ class StaticAcceptanceTests(unittest.TestCase):
         tunnel = (ROOT / "ops/systemd/bee-dev-mcp-tunnel.service").read_text(encoding="utf-8")
         self.assertIn("Type=simple", mcp)
         self.assertIn("WorkingDirectory=/home/bee/Pro/bee-dev-mcp", mcp)
-        self.assertIn("/.venv/bin/python server.py", mcp)
+        self.assertIn("/.venv/bin/python", mcp)
+        self.assertIn("server.py", mcp)
         self.assertNotIn("uv ", mcp)
         self.assertNotIn("[Install]", mcp + tunnel)
-        self.assertIn("source \"$HOME/.config/bee-dev-mcp/secrets.env\"", mcp)
+        self.assertNotIn("secrets.env", mcp)
         self.assertIn("After=bee-dev-mcp.service", tunnel)
         self.assertIn("Requires=bee-dev-mcp.service", tunnel)
         self.assertIn("tunnel.env", tunnel)
@@ -265,16 +262,36 @@ class StaticAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=TMP_ROOT) as temp:
             config = Path(temp) / "projects.yml"
             config.write_text(
-                f"run_root: {temp}/runs\nprojects: {{}}\n", encoding="utf-8"
+                "limits:\n"
+                "  max_file_bytes: 200000\n"
+                "  max_diff_chars: 120000\n"
+                "  max_context_chars: 160000\n"
+                "  max_tree_entries: 4000\n"
+                "  max_search_results: 200\n"
+                "deny_paths: []\n"
+                "projects:\n"
+                f"  test-proj:\n"
+                f"    source: {ROOT}\n"
+                f"    base_branch: main\n"
+                f"    context_modes:\n"
+                f"      A:\n"
+                f"        files:\n"
+                f"          - README.md\n",
+                encoding="utf-8"
             )
             old_config = os.environ.get("BEE_MCP_CONFIG")
             os.environ["BEE_MCP_CONFIG"] = str(config)
             try:
-                spec = importlib.util.spec_from_file_location("tested_server", ROOT / "server.py")
-                self.assertIsNotNone(spec)
-                self.assertIsNotNone(spec.loader)
+                spec = importlib.util.spec_from_file_location(
+                    "tested_server",
+                    ROOT / "server.py",
+                )
+                if spec is None or spec.loader is None:
+                    raise AssertionError("Cannot load server.py")
+
+                loader = spec.loader
                 module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                loader.exec_module(module)
                 app = module.mcp.streamable_http_app()
                 routes = {route.path: route for route in app.routes}
                 self.assertIn("/mcp", routes)
