@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -164,12 +165,22 @@ mcp = FastMCP(
         "to load the configured project files for the chosen mode. "
         "Before final review, call get_review_bundle to obtain the current diff and "
         "changed file contents.\n\n"
+        "omitted_files and related_omitted_files contain objects with target, path, "
+        "and reason. Files with reason 'oversized' or 'context_limit' CAN be read: "
+        "use read_project_file with the object's target and path, and with "
+        "start_line=1 (and start_column=0). The response includes next_line and "
+        "next_column — pass them as start_line and start_column in the next call. "
+        "Repeat until next_line is null. For a single line longer than "
+        "max_context_chars, next_column advances across chunks. Files with reason "
+        "'denied', 'binary', 'broken', or 'escaping' CANNOT be read and should be "
+        "skipped.\n\n"
         "Available tools:\n"
         "- list_projects: show allowlisted projects and their context modes\n"
         "- list_worktrees: discover Git worktrees for a project\n"
         "- get_project_context: read configured files for a target and mode\n"
         "- get_review_bundle: get diff, changed files, and context for review\n"
-        "- read_project_file: read a single file by relative path\n"
+        "- read_project_file: read a single file by relative path (supports "
+        "start_line and start_column for chunked reading)\n"
         "- search_project: fixed-string search within configured boundaries"
     ),
     host="127.0.0.1",
@@ -327,7 +338,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
     return candidates[0]
 
 
-def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
+def _classify_path_meta(target_root: Path, rel: str) -> dict[str, Any]:
     if _is_denied(rel):
         return {"status": "denied", "reason": rel}
 
@@ -347,24 +358,108 @@ def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
         return {"status": "broken", "reason": f"{rel} is a directory"}
 
     try:
-        data = resolved.read_bytes()
+        with open(resolved, "rb") as f:
+            header = f.read(8192)
     except OSError:
         return {"status": "broken", "reason": rel}
 
-    if b"\x00" in data[:8192]:
+    if b"\x00" in header:
         return {"status": "binary", "reason": rel}
 
-    if len(data) > LIMITS["max_file_bytes"]:
+    return {"status": "safe", "resolved": resolved, "size": resolved.stat().st_size}
+
+
+def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
+    meta = _classify_path_meta(target_root, rel)
+    if meta["status"] != "safe":
+        return meta
+
+    if meta["size"] > LIMITS["max_file_bytes"]:
         return {"status": "oversized", "reason": rel}
+
+    try:
+        data = meta["resolved"].read_bytes()
+    except OSError:
+        return {"status": "broken", "reason": rel}
 
     return {"status": "safe", "content": data.decode("utf-8", errors="replace")}
 
 
-def _safe_read_file(target_root: Path, raw_path: str) -> dict[str, Any]:
-    result = _classify_path(target_root, raw_path)
-    if result["status"] != "safe":
-        raise ValueError(f"Cannot read {raw_path}: {result['status']}")
-    return {"path": raw_path, "content": result["content"]}
+def _safe_read_file_chunked(
+    target_root: Path,
+    raw_path: str,
+    start_line: int = 1,
+    start_column: int = 0,
+) -> dict[str, Any]:
+    if start_line < 1:
+        raise ValueError(f"start_line must be >= 1, got {start_line}")
+    if start_column < 0:
+        raise ValueError(f"start_column must be >= 0, got {start_column}")
+
+    meta = _classify_path_meta(target_root, raw_path)
+    if meta["status"] != "safe":
+        raise ValueError(f"Cannot read {raw_path}: {meta['status']}")
+
+    resolved = meta["resolved"]
+    max_chars = LIMITS["max_context_chars"]
+
+    parts: list[str] = []
+    total = 0
+    cur_line = 1
+    cur_col = 0
+    end_line: int | None = None
+
+    with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        while cur_line < start_line:
+            chunk = f.readline(max_chars)
+            if not chunk:
+                return {
+                    "path": raw_path, "start_line": start_line,
+                    "start_column": start_column, "end_line": None,
+                    "next_line": None, "next_column": None, "content": "",
+                }
+            if chunk.endswith("\n"):
+                cur_line += 1
+
+        remaining = start_column
+        while remaining > 0:
+            chunk = f.readline(min(max_chars, remaining))
+            if not chunk:
+                raise ValueError(
+                    f"start_column exceeds line {start_line}: {start_column}"
+                )
+            remaining -= len(chunk)
+            if chunk.endswith("\n"):
+                raise ValueError(
+                    f"start_column exceeds line {start_line}: {start_column}"
+                )
+
+        cur_col = start_column
+
+        while total < max_chars:
+            chunk = f.readline(max_chars - total)
+            if not chunk:
+                break
+            parts.append(chunk)
+            total += len(chunk)
+            end_line = cur_line
+            if chunk.endswith("\n"):
+                cur_line += 1
+                cur_col = 0
+            else:
+                cur_col += len(chunk)
+
+        has_more = bool(f.read(1))
+
+    return {
+        "path": raw_path,
+        "start_line": start_line,
+        "start_column": start_column,
+        "end_line": end_line,
+        "next_line": cur_line if has_more else None,
+        "next_column": cur_col if has_more else None,
+        "content": "".join(parts),
+    }
 
 
 def _mode_files(project_cfg: dict[str, Any], mode: str) -> list[str]:
@@ -408,36 +503,42 @@ def _mode_tree_roots(project_cfg: dict[str, Any], mode: str) -> list[str]:
 
 
 def _read_mode_files(
-    target_root: Path, project_cfg: dict[str, Any], mode: str
-) -> tuple[dict[str, str], list[str]]:
+    target_root: Path, project_cfg: dict[str, Any], mode: str, target: str = ""
+) -> tuple[dict[str, str], list[dict[str, str]]]:
     files_to_read = _mode_files(project_cfg, mode)
     contents: dict[str, str] = {}
-    omitted: list[str] = []
+    omitted: list[dict[str, str]] = []
     remaining = LIMITS["max_context_chars"]
     for rel in files_to_read:
         if remaining <= 0:
-            omitted.append(rel)
+            omitted.append({"target": target, "path": rel, "reason": "context_limit"})
+            continue
+        meta = _classify_path_meta(target_root, rel)
+        if meta["status"] != "safe":
+            omitted.append(
+                {"target": target, "path": rel, "reason": meta.get("status", "unknown")}
+            )
+            continue
+        if meta["size"] > LIMITS["max_file_bytes"]:
+            omitted.append({"target": target, "path": rel, "reason": "oversized"})
+            continue
+        if meta["size"] > remaining:
+            omitted.append({"target": target, "path": rel, "reason": "context_limit"})
             continue
         result = _classify_path(target_root, rel)
-        if result["status"] == "safe":
-            content = result["content"]
-            if len(content) > remaining:
-                omitted.append(rel)
-                continue
-            contents[rel] = content
-            remaining -= len(content)
-        else:
-            omitted.append(rel)
+        contents[rel] = result["content"]
+        remaining -= len(result["content"])
     return contents, omitted
 
 
 def _read_related(
     mode: str, project_cfg: dict[str, Any], max_chars: int | None = None
-) -> dict[str, str]:
+) -> tuple[dict[str, str], list[dict[str, str]]]:
     if max_chars is None:
         max_chars = LIMITS["max_context_chars"]
     related = project_cfg.get("related", [])
     result: dict[str, str] = {}
+    omitted: list[dict[str, str]] = []
     remaining = max_chars
     for ritem in related:
         rproj = ritem["project"]
@@ -445,17 +546,25 @@ def _read_related(
         rsource = Path(rpcfg["source"]).expanduser().resolve()
         for rf in ritem["files"]:
             if remaining <= 0:
-                break
-            classification = _classify_path(rsource, rf)
-            if classification["status"] != "safe":
+                omitted.append({"target": rproj, "path": rf, "reason": "context_limit"})
+                continue
+            meta = _classify_path_meta(rsource, rf)
+            if meta["status"] != "safe":
+                omitted.append(
+                    {"target": rproj, "path": rf, "reason": meta.get("status", "unknown")}
+                )
+                continue
+            if meta["size"] > LIMITS["max_file_bytes"]:
+                omitted.append({"target": rproj, "path": rf, "reason": "oversized"})
+                continue
+            if meta["size"] > remaining:
+                omitted.append({"target": rproj, "path": rf, "reason": "context_limit"})
                 continue
             key = f"{rproj}/{rf}"
-            content = classification["content"]
-            if len(content) > remaining:
-                continue
-            result[key] = content
-            remaining -= len(content)
-    return result
+            classification = _classify_path(rsource, rf)
+            result[key] = classification["content"]
+            remaining -= len(classification["content"])
+    return result, omitted
 
 
 def _build_repository_tree(
@@ -583,9 +692,11 @@ def get_project_context(target: str, mode: str) -> dict[str, Any]:
             f"Available modes: {', '.join(sorted(modes))}"
         )
 
-    files_content, omitted = _read_mode_files(resolved["root"], pcfg, mode)
+    files_content, omitted = _read_mode_files(
+        resolved["root"], pcfg, mode, target
+    )
     used = sum(len(v) for v in files_content.values())
-    related_content = _read_related(
+    related_content, related_omitted = _read_related(
         mode, pcfg, max(0, LIMITS["max_context_chars"] - used)
     )
     tree_roots = _mode_tree_roots(pcfg, mode)
@@ -601,6 +712,7 @@ def get_project_context(target: str, mode: str) -> dict[str, Any]:
         "files": files_content,
         "related_files": related_content,
         "omitted_files": omitted,
+        "related_omitted_files": related_omitted,
     }
     if tree:
         result["repository_tree"] = tree
@@ -687,46 +799,64 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
 
     safe_paths: set[str] = set()
     redacted_paths: list[str] = list(deleted_denied)
-    omitted_files: list[str] = []
+    omitted_files: list[dict[str, str]] = []
     file_contents: dict[str, str] = {}
 
     for rel in sorted(all_changed):
         if rel in deleted_files:
             continue
-        classification = _classify_path(target_root, rel)
-        st = classification["status"]
+        meta = _classify_path_meta(target_root, rel)
+        st = meta["status"]
         if st == "safe":
+            if meta["size"] > LIMITS["max_file_bytes"]:
+                omitted_files.append({"target": target, "path": rel, "reason": "oversized"})
+                continue
+            classification = _classify_path(target_root, rel)
             safe_paths.add(rel)
             file_contents[rel] = classification["content"]
         elif st == "denied":
             redacted_paths.append(rel)
         elif st == "escaping":
             redacted_paths.append(f"{rel} [escaping symlink]")
-        elif st in ("binary", "oversized"):
-            omitted_files.append(f"{rel} [{st}]")
+        elif st in ("binary",):
+            omitted_files.append({"target": target, "path": rel, "reason": st})
         else:
-            omitted_files.append(rel)
+            omitted_files.append({"target": target, "path": rel, "reason": st})
 
-    for r in renamed_files:
-        from_denied = _is_denied(r["from"]) or r["from"] in redacted_paths
-        to_denied = _is_denied(r["to"]) or r["to"] in redacted_paths
-        if from_denied or to_denied:
-            for path in (r["from"], r["to"]):
+    safe_renames: list[dict[str, str]] = []
+
+    for rename in renamed_files:
+        paths = (rename["from"], rename["to"])
+        denied = any(
+            _is_denied(path) or path in redacted_paths
+            for path in paths
+        )
+
+        if denied:
+            for path in paths:
                 safe_paths.discard(path)
                 file_contents.pop(path, None)
                 if path not in redacted_paths:
                     redacted_paths.append(path)
-        else:
-            # Ensure both sides appear in diff pathspec for rename detection
-            pass  # handled below
+            continue
+
+        target_meta = _classify_path_meta(target_root, rename["to"])
+        if (
+            target_meta["status"] != "safe"
+            or target_meta["size"] > LIMITS["max_file_bytes"]
+        ):
+            for path in paths:
+                if path in deleted_safe:
+                    deleted_safe.remove(path)
+            continue
+
+        safe_renames.append(rename)
 
     diff_pathspec_set: set[str] = set(safe_paths) | set(deleted_safe)
-    for r in renamed_files:
-        from_denied = _is_denied(r["from"]) or r["from"] in redacted_paths
-        to_denied = _is_denied(r["to"]) or r["to"] in redacted_paths
-        if not from_denied and not to_denied:
-            diff_pathspec_set.add(r["from"])
-            diff_pathspec_set.add(r["to"])
+
+    for rename in safe_renames:
+        diff_pathspec_set.add(rename["from"])
+        diff_pathspec_set.add(rename["to"])
     diff_pathspec = sorted(diff_pathspec_set)
 
     diff_parts: list[str] = []
@@ -779,11 +909,20 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
             + f"\n\n[TRUNCATED at {LIMITS['max_diff_chars']} characters]"
         )
 
-    context, _ = _read_mode_files(target_root, pcfg, mode)
+    context, context_omitted = _read_mode_files(target_root, pcfg, mode, target)
     used_ctx = sum(len(v) for v in context.values())
-    related_context = _read_related(
+    related_context, related_omitted = _read_related(
         mode, pcfg, max(0, LIMITS["max_context_chars"] - used_ctx)
     )
+
+    seen_omit: set[tuple[str, str, str]] = set()
+    for o in omitted_files:
+        seen_omit.add((o["target"], o["path"], o["reason"]))
+    for o in context_omitted:
+        key = (o["target"], o["path"], o["reason"])
+        if key not in seen_omit:
+            seen_omit.add(key)
+            omitted_files.append(o)
 
     return {
         "target": target,
@@ -802,18 +941,29 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
         "omitted_files": omitted_files,
         "context": context,
         "related_context": related_context,
+        "related_omitted_files": related_omitted,
     }
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-def read_project_file(target: str, path: str) -> dict[str, Any]:
+def read_project_file(
+    target: str, path: str, start_line: int = 1, start_column: int = 0
+) -> dict[str, Any]:
+    _check_relative_path(path, "path")
     resolved = _resolve_target(target)
-    result = _safe_read_file(resolved["root"], path)
-    return {"target": target, "path": result["path"], "content": result["content"]}
+    chunk = _safe_read_file_chunked(resolved["root"], path, start_line, start_column)
+    return {"target": target, **chunk}
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-def search_project(target: str, query: str, mode: str) -> list[dict[str, Any]]:
+def search_project(target: str, query: str, mode: str) -> dict[str, Any]:
+    if not query:
+        raise ValueError("query must not be empty")
+    if len(query) > LIMITS["max_context_chars"]:
+        raise ValueError(
+            f"query length {len(query)} exceeds max_context_chars"
+            f" ({LIMITS['max_context_chars']})"
+        )
     resolved = _resolve_target(target)
     pcfg = PROJECTS[resolved["project"]]
     target_root = resolved["root"]
@@ -843,20 +993,103 @@ def search_project(target: str, query: str, mode: str) -> list[dict[str, Any]]:
                     search_paths.append(rel)
 
     results: list[dict[str, Any]] = []
+    truncated = False
+
     for rel in search_paths:
         if len(results) >= LIMITS["max_search_results"]:
+            truncated = True
             break
-        classification = _classify_path(target_root, rel)
-        if classification["status"] != "safe":
+        meta = _classify_path_meta(target_root, rel)
+        if meta["status"] != "safe":
             continue
-        text = classification["content"]
-        for lineno, line in enumerate(text.splitlines(), 1):
-            if query in line:
-                results.append({"path": rel, "line": lineno, "text": line.rstrip()})
-                if len(results) >= LIMITS["max_search_results"]:
-                    break
+        resolved_path = meta["resolved"]
+        segment_chars = LIMITS["max_context_chars"]
+        preview_chars = max(
+            1,
+            segment_chars // LIMITS["max_search_results"],
+        )
 
-    return results
+        with open(
+            resolved_path,
+            "r",
+            encoding="utf-8",
+            errors="replace",
+        ) as stream:
+            lineno = 1
+            prefix_parts: list[str] = []
+            prefix_length = 0
+            line_length = 0
+            overlap = ""
+            matched = False
+
+            while True:
+                segment = stream.readline(segment_chars)
+                eof = segment == ""
+                line_complete = eof or segment.endswith("\n")
+
+                if not eof:
+                    line_length += len(segment)
+
+                    if prefix_length < preview_chars:
+                        take = min(
+                            preview_chars - prefix_length,
+                            len(segment),
+                        )
+                        prefix_parts.append(segment[:take])
+                        prefix_length += take
+
+                    searchable = overlap + segment
+                    if query in searchable:
+                        matched = True
+
+                    if len(query) > 1:
+                        overlap = searchable[-(len(query) - 1):]
+                    else:
+                        overlap = ""
+
+                if line_complete:
+                    if matched:
+                        text = "".join(prefix_parts).rstrip()
+                        if line_length > preview_chars:
+                            text += "..."
+
+                        candidate = {
+                            "path": rel,
+                            "line": lineno,
+                            "text": text,
+                        }
+                        trial = {
+                            "results": results + [candidate],
+                            "truncated": False,
+                        }
+
+                        if (
+                            len(json.dumps(trial, ensure_ascii=False))
+                            > LIMITS["max_context_chars"]
+                        ):
+                            truncated = True
+                            break
+
+                        results.append(candidate)
+
+                        if len(results) >= LIMITS["max_search_results"]:
+                            truncated = True
+                            break
+
+                    if eof:
+                        break
+
+                    lineno += 1
+                    prefix_parts = []
+                    prefix_length = 0
+                    line_length = 0
+                    overlap = ""
+                    matched = False
+
+        if truncated:
+            break
+
+    return {"results": results, "truncated": truncated}
 
 
 @mcp.custom_route("/healthz", methods=["GET"])

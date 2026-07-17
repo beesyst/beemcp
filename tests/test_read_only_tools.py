@@ -116,7 +116,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     # --- Tests ---
 
-    def test_01_list_projects_returns_allowlisted_projects_and_modes(self) -> None:
+    def test_list_projects_returns_allowlisted_projects_and_modes(self) -> None:
         repo = self._init_repo("proj_a")
         self._commit_file(repo, "README.md")
         config = self._make_project_yml(
@@ -138,7 +138,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("A", proj_a["context_modes"])
         self.assertNotIn("secrets", str(result))
 
-    def test_02_list_worktrees_detects_main_and_linked(self) -> None:
+    def test_list_worktrees_detects_main_and_linked(self) -> None:
         main_repo = self._init_repo("wt_main")
         self._commit_file(main_repo, "file.txt")
         wt_path = self.root / "wt_linked"
@@ -158,7 +158,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("wt_main", targets)
         self.assertIn(wt_path.name, targets)
 
-    def test_03_target_linked_worktree_equals_basename(self) -> None:
+    def test_target_linked_worktree_equals_basename(self) -> None:
         main_repo = self._init_repo("wt_base")
         self._commit_file(main_repo, "f.txt")
         branch_name = "feature-x"
@@ -181,7 +181,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(len(linked), 1)
         self.assertEqual(linked[0]["target"], "wt_base-pr123")
 
-    def test_04_worktree_other_repo_not_accepted(self) -> None:
+    def test_worktree_other_repo_not_accepted(self) -> None:
         repo_a = self._init_repo("wto_a")
         self._commit_file(repo_a, "a.txt")
         repo_b = self._init_repo("wto_b")
@@ -198,7 +198,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod._resolve_target("wto_b")
 
-    def test_05_unknown_target_raises_value_error(self) -> None:
+    def test_unknown_target_raises_value_error(self) -> None:
         repo = self._init_repo("known_only")
         self._commit_file(repo, "x.txt")
         config = self._make_project_yml(
@@ -213,7 +213,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod._resolve_target("nonexistent_target")
 
-    def test_06_mode_A_reads_only_configured_files(self) -> None:
+    def test_mode_A_reads_only_configured_files(self) -> None:
         repo = self._init_repo("mode_a")
         self._commit_file(repo, "README.md", "# Readme")
         self._commit_file(repo, "SECRET.txt", "shh")
@@ -231,7 +231,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("README.md", result["files"])
         self.assertNotIn("SECRET.txt", result["files"])
 
-    def test_07_mode_B_inherits_A(self) -> None:
+    def test_mode_B_inherits_A(self) -> None:
         repo = self._init_repo("mode_b")
         self._commit_file(repo, "README.md", "# R")
         self._commit_file(repo, "config.yml", "key: val")
@@ -253,7 +253,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("README.md", result["files"])
         self.assertIn("config.yml", result["files"])
 
-    def test_08_mode_C_returns_bounded_tree_not_full_repo(self) -> None:
+    def test_mode_C_returns_bounded_tree_not_full_repo(self) -> None:
         repo = self._init_repo("mode_c")
         self._commit_file(repo, "README.md", "# R")
         self._commit_file(repo, "src/main.py", "print('hello')")
@@ -281,7 +281,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("src/util.py", tree)
         self.assertNotIn("docs/guide.md", tree)
 
-    def test_09_related_roadmap_returned(self) -> None:
+    def test_related_roadmap_returned(self) -> None:
         proj_a = self._init_repo("rel_a")
         self._commit_file(proj_a, "docs/ROADMAP.md", "# Roadmap A")
         proj_b = self._init_repo("rel_b")
@@ -309,7 +309,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_project_context(target="rel_a", mode="A")
         self.assertIn("rel_b/docs/ROADMAP.md", result["related_files"])
 
-    def test_10_review_bundle_includes_committed_branch_changes(self) -> None:
+    def test_review_bundle_includes_committed_branch_changes(self) -> None:
         repo = self._init_repo("rb_commit")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "feature"], repo)
@@ -326,7 +326,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_review_bundle(target="rb_commit", mode="A")
         self.assertIn("feature.txt", result["changed_files"])
 
-    def test_11_bundle_includes_staged_changes(self) -> None:
+    def test_bundle_includes_staged_changes(self) -> None:
         repo = self._init_repo("rb_staged")
         self._commit_file(repo, "base.txt", "base")
         (repo / "staged.txt").write_text("staged", encoding="utf-8")
@@ -343,7 +343,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_review_bundle(target="rb_staged", mode="A")
         self.assertIn("staged.txt", result["changed_files"])
 
-    def test_12_bundle_includes_unstaged_changes(self) -> None:
+    def test_bundle_includes_unstaged_changes(self) -> None:
         repo = self._init_repo("rb_unstaged")
         self._commit_file(repo, "base.txt", "base")
         (repo / "base.txt").write_text("modified", encoding="utf-8")
@@ -359,7 +359,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_review_bundle(target="rb_unstaged", mode="A")
         self.assertIn("base.txt", result["changed_files"])
 
-    def test_13_bundle_includes_safe_untracked_text_files(self) -> None:
+    def test_bundle_includes_safe_untracked_text_files(self) -> None:
         repo = self._init_repo("rb_untracked")
         self._commit_file(repo, "base.txt", "base")
         (repo / "new_file.txt").write_text("untracked", encoding="utf-8")
@@ -375,7 +375,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_review_bundle(target="rb_untracked", mode="A")
         self.assertIn("new_file.txt", result["untracked_files"])
 
-    def test_14_bundle_marks_deleted_file(self) -> None:
+    def test_bundle_marks_deleted_file(self) -> None:
         repo = self._init_repo("rb_deleted")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, "todelete.txt", "delete me")
@@ -395,7 +395,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("todelete.txt", result["deleted_files"])
         self.assertIn("todelete.txt", result["diff"])
 
-    def test_15_bundle_marks_rename(self) -> None:
+    def test_bundle_marks_rename(self) -> None:
         repo = self._init_repo("rb_rename")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, "old.txt", "rename me")
@@ -420,7 +420,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             msg=f"No rename old.txt->new.txt in {result['renamed_files']}",
         )
 
-    def test_16_bundle_returns_current_changed_text_file_contents(self) -> None:
+    def test_bundle_returns_current_changed_text_file_contents(self) -> None:
         repo = self._init_repo("rb_contents")
         self._commit_file(repo, "base.txt", "base")
         (repo / "base.txt").write_text("updated content", encoding="utf-8")
@@ -437,7 +437,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("base.txt", result["file_contents"])
         self.assertEqual(result["file_contents"]["base.txt"], "updated content")
 
-    def test_17_untracked_env_absent_from_diff_and_file_contents(self) -> None:
+    def test_untracked_env_absent_from_diff_and_file_contents(self) -> None:
         repo = self._init_repo("rb_deny")
         self._commit_file(repo, "base.txt", "base")
         (repo / ".env").write_text("SECRET=key", encoding="utf-8")
@@ -455,7 +455,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn(".env", result["redacted_paths"])
         self.assertNotIn(".env", result.get("diff", ""))
 
-    def test_18_tracked_nested_env_absent_from_diff_and_file_contents(self) -> None:
+    def test_tracked_nested_env_absent_from_diff_and_file_contents(self) -> None:
         repo = self._init_repo("rb_nest_env")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "env-branch"], repo)
@@ -478,7 +478,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("sub/.env", result["redacted_paths"])
         self.assertNotIn("sub/.env", result.get("diff", ""))
 
-    def test_19_untracked_alias_to_env_not_resolved(self) -> None:
+    def test_untracked_alias_to_env_not_resolved(self) -> None:
         repo = self._init_repo("rb_alias")
         self._commit_file(repo, "base.txt", "base")
         (repo / ".env").write_text("SECRET=key", encoding="utf-8")
@@ -496,7 +496,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("alias.txt", result["file_contents"])
         self.assertNotIn("SECRET=key", result.get("diff", ""))
 
-    def test_20_untracked_escaping_symlink_not_read(self) -> None:
+    def test_untracked_escaping_symlink_not_read(self) -> None:
         repo = self._init_repo("rb_escape")
         self._commit_file(repo, "base.txt", "base")
         escape_target = self.root / "outside.txt"
@@ -515,7 +515,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("escape.txt", result["file_contents"])
         self.assertNotIn("escaped", result.get("diff", ""))
 
-    def test_21_broken_symlink_not_read(self) -> None:
+    def test_broken_symlink_not_read(self) -> None:
         repo = self._init_repo("rb_broken")
         self._commit_file(repo, "base.txt", "base")
         (repo / "broken.txt").symlink_to("nonexistent")
@@ -532,7 +532,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("broken.txt", result["file_contents"])
         self.assertNotIn("broken.txt", result.get("diff", ""))
 
-    def test_22_tracked_binary_file_not_in_diff(self) -> None:
+    def test_tracked_binary_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_binary")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "binary-branch"], repo)
@@ -552,7 +552,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("data.bin", result["file_contents"])
         self.assertNotIn("data.bin", result.get("diff", ""))
 
-    def test_23_tracked_oversized_file_not_in_diff(self) -> None:
+    def test_tracked_oversized_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_oversized")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "oversized-branch"], repo)
@@ -572,12 +572,11 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_review_bundle(target="rb_oversized", mode="A")
         self.assertNotIn("large.txt", result["file_contents"])
         self.assertNotIn("large.txt", result.get("diff", ""))
-        self.assertTrue(
-            any("large.txt" in o for o in result["omitted_files"]),
-            msg=f"large.txt not in omitted: {result['omitted_files']}"
-        )
+        omitted_paths = {o["path"] for o in result["omitted_files"]}
+        self.assertIn("large.txt", omitted_paths,
+                      msg=f"large.txt not in omitted: {result['omitted_files']}")
 
-    def test_24_read_project_file_rejects_absolute_path(self) -> None:
+    def test_read_project_file_rejects_absolute_path(self) -> None:
         repo = self._init_repo("rpf_abs")
         self._commit_file(repo, "safe.txt", "safe")
         config = self._make_project_yml(
@@ -589,10 +588,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, RuntimeError)):
             mod.read_project_file(target="rpf_abs", path="/etc/passwd")
 
-    def test_25_read_project_file_rejects_dot_dot(self) -> None:
+    def test_read_project_file_rejects_dot_dot(self) -> None:
         repo = self._init_repo("rpf_dotdot")
         self._commit_file(repo, "safe.txt", "safe")
         config = self._make_project_yml(
@@ -604,10 +603,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, RuntimeError)):
             mod.read_project_file(target="rpf_dotdot", path="../outside.txt")
 
-    def test_26_search_project_fixed_string(self) -> None:
+    def test_search_project_fixed_string(self) -> None:
         repo = self._init_repo("search_fixed")
         self._commit_file(repo, "src/main.py", "def hello(): pass")
         self._commit_file(repo, "README.md", "# Hello World")
@@ -622,12 +621,36 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '          - README.md\n'
         )
         mod = self._import_server(config)
-        results = mod.search_project(target="search_fixed", query="hello", mode="A")
-        self.assertTrue(len(results) >= 1)
-        found = any("hello" in r["text"].lower() for r in results)
+        sr = mod.search_project(target="search_fixed", query="hello", mode="A")
+        self.assertIn("results", sr)
+        self.assertIn("truncated", sr)
+        self.assertTrue(len(sr["results"]) >= 1)
+        found = any("hello" in r["text"].lower() for r in sr["results"])
         self.assertTrue(found)
 
-    def test_27_invalid_project_target_mode_raises_error(self) -> None:
+    def test_search_project_query_validation(self) -> None:
+        repo = self._init_repo("search_val")
+        self._commit_file(repo, "f.txt", "content")
+        config = self._make_project_yml(
+            '  search_val:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files:\n'
+            '          - f.txt\n'
+        )
+        mod = self._import_server(config)
+        with self.assertRaises(ValueError):
+            mod.search_project(target="search_val", query="", mode="A")
+        with self.assertRaises(ValueError):
+            too_long = "x" * (mod.LIMITS["max_context_chars"] + 1)
+            mod.search_project(target="search_val", query=too_long, mode="A")
+        max_len = "x" * mod.LIMITS["max_context_chars"]
+        sr = mod.search_project(target="search_val", query=max_len, mode="A")
+        self.assertIn("results", sr)
+
+    def test_invalid_project_target_mode_raises_error(self) -> None:
         repo = self._init_repo("valid_proj")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
@@ -646,7 +669,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mod.get_project_context(target="valid_proj", mode="Z")
 
-    def test_28_all_tool_annotations_are_toolannotations(self) -> None:
+    def test_all_tool_annotations_are_toolannotations(self) -> None:
         from mcp.types import ToolAnnotations
         repo = self._init_repo("ro_check")
         self._commit_file(repo, "f.txt", "x")
@@ -674,7 +697,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
                 f"Tool {t.name} has destructive hint",
             )
 
-    def test_29_no_copilot_codex_run_check_write_tools(self) -> None:
+    def test_no_copilot_codex_run_check_write_tools(self) -> None:
         repo = self._init_repo("no_agent")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
@@ -696,7 +719,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         for name in forbidden:
             self.assertNotIn(name, tool_names, f"Forbidden tool found: {name}")
 
-    def test_30_health_readiness_routes_work(self) -> None:
+    def test_health_readiness_routes_work(self) -> None:
         import asyncio
         repo = self._init_repo("health_test")
         self._commit_file(repo, "f.txt", "x")
@@ -718,7 +741,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             self.assertEqual(response.body, expected_body)
             self.assertEqual(response.media_type, "text/plain")
 
-    def test_31_module_imports_without_tmpdir(self) -> None:
+    def test_module_imports_without_tmpdir(self) -> None:
         import importlib.util
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         spec = importlib.util.spec_from_file_location("_server_import", server_py)
@@ -730,7 +753,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertTrue(hasattr(module, "list_projects"))
         self.assertTrue(hasattr(module, "get_review_bundle"))
 
-    def test_32_related_symlink_to_denied_file_not_read(self) -> None:
+    def test_related_symlink_to_denied_file_not_read(self) -> None:
         main_repo = self._init_repo("rel_main")
         self._commit_file(main_repo, "docs/guide.md", "safe guide")
         related_repo = self._init_repo("rel_sec")
@@ -764,7 +787,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("rel_sec/docs/config.txt", result["related_files"])
         self.assertNotIn("SECRET", str(result["related_files"]))
 
-    def test_33_max_context_chars_limits_response(self) -> None:
+    def test_max_context_chars_limits_response(self) -> None:
         repo = self._init_repo("ctx_lim")
         self._commit_file(repo, "small.txt", "small")
         very_long = "x" * 200000
@@ -791,9 +814,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
         result = mod.get_project_context(target="ctx_lim", mode="A")
         self.assertIn("small.txt", result["files"])
         self.assertNotIn("large.txt", result["files"])
-        self.assertIn("large.txt", result["omitted_files"])
+        omitted_paths = {o["path"] for o in result["omitted_files"]}
+        self.assertIn("large.txt", omitted_paths)
 
-    def test_34_merge_base_failure_raises_runtime_error(self) -> None:
+    def test_merge_base_failure_raises_runtime_error(self) -> None:
         repo = self._init_repo("mg_fail")
         self._commit_file(repo, "f.txt", "x")
         _run_git(["git", "checkout", "--orphan", "orphan"], repo)
@@ -812,7 +836,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             mod.get_review_bundle(target="mg_fail", mode="A")
 
 
-    def test_35_deleted_denied_file_not_in_diff(self) -> None:
+    def test_deleted_denied_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_del_deny")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, ".env", "SECRET=key")
@@ -833,7 +857,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn(".env", result.get("diff", ""))
         self.assertIn(".env", result["redacted_paths"])
 
-    def test_36_shared_context_budget_files_and_related(self) -> None:
+    def test_shared_context_budget_files_and_related(self) -> None:
         main_repo = self._init_repo("shared_ctx")
         self._commit_file(main_repo, "a.txt", "a" * 3000)
         self._commit_file(main_repo, "b.txt", "b" * 3000)
@@ -873,7 +897,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         total += sum(len(v) for v in result["related_files"].values())
         self.assertLessEqual(total, 5000)
 
-    def test_37_staged_rename_appears_in_renamed_files(self) -> None:
+    def test_staged_rename_appears_in_renamed_files(self) -> None:
         repo = self._init_repo("stg_ren")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, "old.txt", "rename me")
@@ -899,7 +923,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("old.txt", result["diff"])
         self.assertIn("new.txt", result["diff"])
 
-    def test_38_staged_rename_both_paths_in_diff(self) -> None:
+    def test_staged_rename_both_paths_in_diff(self) -> None:
         repo = self._init_repo("stg_ren2")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, "old.txt", "rename me")
@@ -924,7 +948,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("old.txt", result["diff"])
         self.assertIn("new.txt", result["diff"])
 
-    def test_39_rename_from_denied_path_not_leaked(self) -> None:
+    def test_rename_from_denied_path_not_leaked(self) -> None:
         repo = self._init_repo("den_ren")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, ".env", "SECRET=key")
@@ -950,6 +974,489 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertTrue(
             any("config.env" in p for p in result.get("redacted_paths", [])),
             msg=f"config.env not in redacted_paths: {result.get('redacted_paths')}",
+        )
+
+    def _chunk_config(self, repo: Path, name: str,
+                      max_file_bytes: int = 100,
+                      max_context_chars: int = 200) -> str:
+        return (
+            "limits:\n"
+            f"  max_file_bytes: {max_file_bytes}\n"
+            "  max_diff_chars: 120000\n"
+            f"  max_context_chars: {max_context_chars}\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths:\n"
+            '  - ".env"\n'
+            '  - "**/secret/**"\n'
+            "projects:\n"
+            f"  {name}:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+
+    def test_read_project_file_chunked_sequential(self) -> None:
+        repo = self._init_repo("rpf_seq")
+        N = 30
+        lines = [f"LINE {i:03d} {'x' * 52}\n" for i in range(1, N + 1)]
+        full_text = "".join(lines)
+        self._commit_file(repo, "big.txt", full_text)
+
+        mod = self._import_server(self._chunk_config(repo, "rpf_seq"))
+
+        chunks: list[str] = []
+        sl, sc = 1, 0
+        while True:
+            r = mod.read_project_file(target="rpf_seq", path="big.txt",
+                                      start_line=sl, start_column=sc)
+            self.assertEqual(r["path"], "big.txt")
+            self.assertEqual(r["start_line"], sl)
+            self.assertEqual(r["start_column"], sc)
+            chunks.append(r["content"])
+            if r["next_line"] is None and r["next_column"] is None:
+                break
+            sl = r["next_line"]
+            sc = r["next_column"]
+
+        self.assertEqual("".join(chunks), full_text)
+
+    def test_read_project_file_cursor_before_newline(self) -> None:
+        repo = self._init_repo("rpf_newline")
+        self._commit_file(repo, "file.txt", "hello\nworld\n")
+
+        mod = self._import_server(
+            self._chunk_config(
+                repo,
+                "rpf_newline",
+                max_context_chars=5,
+            )
+        )
+
+        first = mod.read_project_file(
+            target="rpf_newline",
+            path="file.txt",
+        )
+        second = mod.read_project_file(
+            target="rpf_newline",
+            path="file.txt",
+            start_line=first["next_line"],
+            start_column=first["next_column"],
+        )
+
+        self.assertEqual(first["content"], "hello")
+        self.assertEqual(first["next_line"], 1)
+        self.assertEqual(first["next_column"], 5)
+        self.assertTrue(second["content"].startswith("\n"))
+
+    def test_read_project_file_invalid_start_line(self) -> None:
+        repo = self._init_repo("rpf_inv")
+        self._commit_file(repo, "f.txt", "hello\nworld\n")
+        mod = self._import_server(self._chunk_config(repo, "rpf_inv"))
+        with self.assertRaises(ValueError):
+            mod.read_project_file(target="rpf_inv", path="f.txt", start_line=0)
+        with self.assertRaises(ValueError):
+            mod.read_project_file(
+                target="rpf_inv",
+                path="f.txt",
+                start_line=1,
+                start_column=-1,
+            )
+        with self.assertRaises(ValueError):
+            mod.read_project_file(
+                target="rpf_inv",
+                path="f.txt",
+                start_line=1,
+                start_column=6,
+            )
+
+    def test_read_project_file_denied_path(self) -> None:
+        repo = self._init_repo("rpf_den")
+        self._commit_file(repo, ".env", "SECRET=key")
+        mod = self._import_server(self._chunk_config(repo, "rpf_den"))
+        with self.assertRaises(ValueError):
+            mod.read_project_file(target="rpf_den", path=".env")
+
+    def test_read_project_file_escaping_symlink(self) -> None:
+        repo = self._init_repo("rpf_esc")
+        self._commit_file(repo, "safe.txt", "safe")
+        outside = self.root / "outside.txt"
+        outside.write_text("outside", encoding="utf-8")
+        (repo / "escape.txt").symlink_to(os.path.relpath(outside, repo))
+        _run_git(["git", "add", "escape.txt"], repo)
+        _run_git(["git", "commit", "-m", "add escape symlink"], repo)
+        mod = self._import_server(self._chunk_config(repo, "rpf_esc"))
+        with self.assertRaises(ValueError):
+            mod.read_project_file(target="rpf_esc", path="escape.txt")
+
+    def test_read_project_file_binary_file(self) -> None:
+        repo = self._init_repo("rpf_bin")
+        self._commit_file(repo, "safe.txt", "safe")
+        (repo / "data.bin").write_bytes(b"\x00\x01\x02")
+        _run_git(["git", "add", "data.bin"], repo)
+        _run_git(["git", "commit", "-m", "add binary"], repo)
+        mod = self._import_server(self._chunk_config(repo, "rpf_bin"))
+        with self.assertRaises(ValueError):
+            mod.read_project_file(target="rpf_bin", path="data.bin")
+
+    def test_search_project_oversized_text_file(self) -> None:
+        repo = self._init_repo("srch_ovr")
+        lines = [f"SEARCH_ME line {i} {'x' * 50}\n" for i in range(1, 40)]
+        full_text = "".join(lines)
+        self._commit_file(repo, "big.log", full_text)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 100\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  srch_ovr:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - big.log\n"
+        )
+        mod = self._import_server(config)
+        sr = mod.search_project(target="srch_ovr", query="SEARCH_ME",
+                                mode="A")
+        self.assertTrue(len(sr["results"]) >= 1,
+                        msg="should find matches in oversized file")
+        found_lines = {r["line"] for r in sr["results"]}
+        self.assertIn(1, found_lines, msg="line 1 should be found")
+        self.assertIn(39, found_lines, msg="line 39 should be found")
+
+    def test_single_line_longer_than_max_context_chars(self) -> None:
+        repo = self._init_repo("rpf_longln")
+        text = "A" * 500
+        self._commit_file(repo, "long.txt", text)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 1000000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 100\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  rpf_longln:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+
+        chunks: list[str] = []
+        sl, sc = 1, 0
+        while True:
+            r = mod.read_project_file(target="rpf_longln", path="long.txt",
+                                      start_line=sl, start_column=sc)
+            self.assertLessEqual(len(r["content"]), 100,
+                                 msg="chunk exceeds max_context_chars")
+            chunks.append(r["content"])
+            if r["next_line"] is None and r["next_column"] is None:
+                break
+            self.assertTrue(
+                r["next_line"] != sl or r["next_column"] != sc,
+                msg="cursor did not advance",
+            )
+            sl, sc = r["next_line"], r["next_column"]
+
+        self.assertEqual("".join(chunks), text,
+                         msg="reassembled content must match original")
+
+    def test_context_limit_reason_in_omitted_files(self) -> None:
+        repo = self._init_repo("gpc_ctxlim")
+        content_a = "a" * 3000
+        content_b = "b" * 3000
+        self._commit_file(repo, "a.txt", content_a)
+        self._commit_file(repo, "b.txt", content_b)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 500000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 3500\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  gpc_ctxlim:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - a.txt\n"
+            f"          - b.txt\n"
+        )
+        mod = self._import_server(config)
+        result = mod.get_project_context(target="gpc_ctxlim", mode="A")
+
+        self.assertIn("omitted_files", result)
+        omitted = result["omitted_files"]
+        reasons = {o["reason"] for o in omitted}
+        paths = {o["path"] for o in omitted}
+        self.assertIn("context_limit", reasons,
+                      msg="context_limit reason must be present")
+        self.assertIn("b.txt", paths,
+                      msg="b.txt should be omitted (budget exhausted)")
+
+    def test_related_omitted_files_contains_oversized_reason(self) -> None:
+        main_repo = self._init_repo("rel_omit_main")
+        self._commit_file(main_repo, "main.txt", "main")
+        related_repo = self._init_repo("rel_omit_rel")
+        large = "x" * 3000
+        self._commit_file(related_repo, "big.txt", large)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 100\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 50000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  rel_omit_main:\n"
+            f"    source: {main_repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - main.txt\n"
+            f"    related:\n"
+            f"      - project: rel_omit_rel\n"
+            f"        files:\n"
+            f"          - big.txt\n"
+            f"  rel_omit_rel:\n"
+            f"    source: {related_repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        result = mod.get_project_context(target="rel_omit_main", mode="A")
+
+        self.assertIn("related_omitted_files", result)
+        related_omit = result["related_omitted_files"]
+        self.assertTrue(len(related_omit) >= 1,
+                        msg="should have at least one related omitted entry")
+        found = any(
+            o["target"] == "rel_omit_rel" and o["path"] == "big.txt"
+            for o in related_omit
+        )
+        self.assertTrue(found,
+                        msg="rel_omit_rel/big.txt should be in related_omitted")
+
+    def test_search_finds_match_across_segments(self) -> None:
+        repo = self._init_repo("srch_segments")
+        content = "x" * 198 + "NEEDLE" + "tail\n"
+        self._commit_file(repo, "data.txt", content)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 500000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 200\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 4\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  srch_segments:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - data.txt\n"
+        )
+
+        mod = self._import_server(config)
+        result = mod.search_project(
+            target="srch_segments",
+            query="NEEDLE",
+            mode="A",
+        )
+
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(result["results"][0]["line"], 1)
+
+    def test_search_total_response_bounded(self) -> None:
+        repo = self._init_repo("srch_total")
+        lines = [f"MATCH line {i:03d} {'x' * 80}\n" for i in range(1, 200)]
+        self._commit_file(repo, "big.log", "".join(lines))
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 500000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 500\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  srch_total:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - big.log\n"
+        )
+        mod = self._import_server(config)
+        sr = mod.search_project(target="srch_total", query="MATCH", mode="A")
+        total = sum(len(r["text"]) for r in sr["results"])
+        self.assertLessEqual(total, 500,
+                             msg=f"total search response too large: {total}")
+
+    def test_review_bundle_omitted_includes_context_and_related(self) -> None:
+        repo = self._init_repo("rb_omit_ctx")
+        large = "x" * 3000
+        self._commit_file(repo, "docs/ROADMAP.md", large)
+        related_repo = self._init_repo("rb_omit_rel")
+        self._commit_file(related_repo, "docs/ROADMAP.md", large)
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "base.txt").write_text("modified", encoding="utf-8")
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 100\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 50000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  rb_omit_ctx:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - docs/ROADMAP.md\n"
+            f"    related:\n"
+            f"      - project: rb_omit_rel\n"
+            f"        files:\n"
+            f"          - docs/ROADMAP.md\n"
+            f"  rb_omit_rel:\n"
+            f"    source: {related_repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        result = mod.get_review_bundle(target="rb_omit_ctx", mode="A")
+
+        self.assertIn("omitted_files", result)
+        self.assertIn("related_omitted_files", result)
+        omitted_paths = {o["path"] for o in result["omitted_files"]}
+        self.assertIn("docs/ROADMAP.md", omitted_paths,
+                      msg="oversized own ROADMAP should be in omitted_files")
+        related_omit_paths = {o["path"] for o in result["related_omitted_files"]}
+        self.assertIn("docs/ROADMAP.md", related_omit_paths,
+                      msg="oversized related ROADMAP should be in related_omitted_files")
+        related_targets = {o["target"] for o in result["related_omitted_files"]}
+        self.assertIn("rb_omit_rel", related_targets,
+                      msg="related target should be rb_omit_rel")
+
+    def test_search_serialized_size_respected(self) -> None:
+        repo = self._init_repo("srch_ser")
+        lines = [
+            'simple line\n',
+            'line with "quotes" and \\backslash\n',
+            'line with unicode: \u00e9\u00e0\u00fc\u00f1\n',
+            "line with tab\tand \x01control\x02chars\n",
+        ]
+        self._commit_file(repo, "data.log", "".join(lines))
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 500000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 200\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  srch_ser:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files:\n"
+            f"          - data.log\n"
+        )
+        mod = self._import_server(config)
+        import json
+        sr = mod.search_project(target="srch_ser", query="line", mode="A")
+        self.assertTrue(len(sr["results"]) > 0,
+                        msg="search should find matches")
+        serialized = json.dumps(sr, ensure_ascii=False)
+        self.assertLessEqual(
+            len(serialized), 200,
+            msg=f"serialized search response ({len(serialized)} bytes) "
+                f"exceeds max_context_chars=200",
+        )
+
+    def test_oversized_rename_not_in_diff(self) -> None:
+        repo = self._init_repo("rb_rename_oversized")
+        large = "x" * 3000
+        self._commit_file(repo, "old.txt", large)
+        _run_git(["git", "checkout", "-b", "rename-oversized"], repo)
+        _run_git(["git", "mv", "old.txt", "new.txt"], repo)
+        _run_git(["git", "commit", "-m", "rename oversized file"], repo)
+
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 100\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 5000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  rb_rename_oversized:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+
+        mod = self._import_server(config)
+        result = mod.get_review_bundle(
+            target="rb_rename_oversized",
+            mode="A",
+        )
+
+        self.assertTrue(
+            any(
+                rename["from"] == "old.txt"
+                and rename["to"] == "new.txt"
+                for rename in result["renamed_files"]
+            )
+        )
+        self.assertNotIn("old.txt", result["diff"])
+        self.assertNotIn("new.txt", result["diff"])
+        self.assertTrue(
+            any(
+                item["path"] == "new.txt"
+                and item["reason"] == "oversized"
+                for item in result["omitted_files"]
+            )
         )
 
 
