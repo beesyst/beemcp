@@ -3,21 +3,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
-
-EXPECTED_TOOLS = (
-    "list_projects",
-    "list_worktrees",
-    "get_project_context",
-    "get_review_manifest",
-    "get_review_bundle_page",
-    "get_review_bundle",
-    "read_project_file",
-    "search_project",
-)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from mcp_contract import EXPECTED_TOOLS, tool_contract_fingerprint
 
 
 def _parse_args() -> argparse.Namespace:
@@ -40,15 +32,22 @@ def main() -> int:
     try:
         found = asyncio.run(_list_tools(args.url))
     except Exception:
-        print("MCP transport or protocol check failed", file=sys.stderr)
         return 1
 
+    expected = set(EXPECTED_TOOLS)
     missing = [name for name in EXPECTED_TOOLS if name not in found]
+    unexpected = sorted(found - expected)
+
     for name in missing:
         print(f"missing MCP tool: {name}", file=sys.stderr)
-    if missing:
+    for name in unexpected:
+        print(f"unexpected MCP tool: {name}", file=sys.stderr)
+
+    if missing or unexpected:
         return 1
-    print(f"OK: all {len(EXPECTED_TOOLS)} expected tools found")
+
+    print(f"OK: exact {len(EXPECTED_TOOLS)}-tool contract found")
+    print(f"tool_contract_sha256={tool_contract_fingerprint(found)}")
     return 0
 
 

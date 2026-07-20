@@ -780,6 +780,66 @@ class ReadOnlyToolsTests(unittest.TestCase):
             self.assertEqual(response.body, expected_body)
             self.assertEqual(response.media_type, "text/plain")
 
+    def test_versionz_returns_identity_and_no_leaks(self) -> None:
+        import asyncio
+        import json
+        repo = self._init_repo("ver_test")
+        self._commit_file(repo, "f.txt", "x")
+        config = self._make_project_yml(
+            '  ver_test:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        app = mod.mcp.streamable_http_app()
+        routes = {route.path: route for route in app.routes}
+        self.assertIn("/versionz", routes)
+        response = asyncio.run(routes["/versionz"].endpoint(None))
+        self.assertEqual(response.status_code, 200)
+        data = json.loads(response.body)
+        self.assertEqual(data["service"], "bee-dev-mcp")
+        self.assertIsInstance(data["git_head"], str)
+        self.assertTrue(len(data["git_head"]) > 0)
+        self.assertEqual(data["tool_contract_version"], 2)
+        self.assertEqual(data["tool_count"], 8)
+        self.assertEqual(
+            data["tool_contract_sha256"],
+            mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
+        )
+        response2 = asyncio.run(routes["/versionz"].endpoint(None))
+        data2 = json.loads(response2.body)
+        self.assertEqual(
+            data["tool_contract_sha256"],
+            data2["tool_contract_sha256"],
+        )
+        serialized = json.dumps(data)
+        self.assertNotIn(str(repo), serialized)
+        self.assertNotIn("/home/", serialized)
+        self.assertNotIn("SECRET", serialized)
+        self.assertNotIn("token", serialized.lower())
+        self.assertNotIn("credential", serialized.lower())
+        self.assertNotIn("tunnel", serialized.lower())
+        self.assertNotIn("env", serialized.lower())
+
+    def test_mcp_tools_list_contains_exactly_eight_expected(self) -> None:
+        repo = self._init_repo("tools_count")
+        self._commit_file(repo, "f.txt", "x")
+        config = self._make_project_yml(
+            '  tools_count:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        tools = mod.mcp._tool_manager.list_tools()
+        tool_names = {tool.name for tool in tools}
+        self.assertEqual(tool_names, set(mod.EXPECTED_TOOLS))
+
     def test_module_imports_without_tmpdir(self) -> None:
         import importlib.util
         server_py = Path(__file__).resolve().parents[1] / "server.py"
@@ -3061,11 +3121,7 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                     return {tool.name for tool in result.tools}
 
                 names = asyncio.run(list_names())
-                self.assertTrue(set((
-                    "list_projects", "list_worktrees", "get_project_context",
-                    "get_review_manifest", "get_review_bundle_page",
-                    "get_review_bundle", "read_project_file", "search_project",
-                )).issubset(names))
+                self.assertEqual(names, set(module.EXPECTED_TOOLS))
             finally:
                 if server is not None:
                     server.should_exit = True

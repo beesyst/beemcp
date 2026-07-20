@@ -195,9 +195,38 @@ shows an old schema, refresh or reconnect the Bee Dev MCP app/connector.
 
 ## Health endpoints
 
-| Path       | Status | Body  |
-|------------|--------|-------|
-| `/healthz` | 200    | `live`  |
+| Path         | Status | Body  |
+|--------------|--------|-------|
+| `/healthz`   | 200    | `live`  |
+| `/readyz`    | 200    | `ready` |
+| `/versionz`  | 200    | service identity JSON |
+
+## Tool schema changed but ChatGPT still shows old tools
+
+After modifying tool declarations, the ChatGPT connector may cache stale
+schema. The local `doctor` checks **localhost and tunnel process state only**;
+it cannot verify the remote ChatGPT snapshot.
+
+Exact sequence to propagate changes:
+
+1. `./start.sh restart`
+2. `./start.sh doctor` — confirm local tools/list contains eight tools
+3. Open the Bee Dev MCP app settings in ChatGPT
+4. Click **Refresh** for actions/tools
+5. Confirm the updated contract is shown
+6. Start a new chat
+7. Verify that `get_review_manifest` and `get_review_bundle_page` are available
+
+Important:
+
+- `doctor` checks localhost and tunnel process state, **not** the client-side
+  ChatGPT snapshot.
+- `get_review_bundle` cannot replace paginated review tools.
+- A schema with only six tools is insufficient for a complete review.
+- BeeAgent prompts and skills must not be relaxed because of a stale connector
+  schema.
+- The server cannot automatically update the ChatGPT connector — manual
+  app Refresh is required after every tool schema change.
 | `/readyz`  | 200    | `ready` |
 
 ## Systemd workflow

@@ -10,6 +10,7 @@ TUNNEL_SVC="bee-dev-mcp-tunnel.service"
 MCP_BASE_URL="http://127.0.0.1:8000"
 HEALTHZ_URL="${MCP_BASE_URL}/healthz"
 READYZ_URL="${MCP_BASE_URL}/readyz"
+VERSIONZ_URL="${MCP_BASE_URL}/versionz"
 MCP_URL="${MCP_BASE_URL}/mcp"
 
 die() { echo "$*" >&2; exit 1; }
@@ -87,6 +88,10 @@ cmd_up() {
     cmd_setup
   fi
   start_stack
+  curl --fail --silent "${VERSIONZ_URL}"
+  echo ""
+  echo "ChatGPT connector schema is not verified by local doctor."
+  echo "After tool schema changes, refresh the Bee Dev MCP app actions and start a new chat."
   echo "Stack is up"
 }
 
@@ -105,6 +110,10 @@ cmd_restart() {
   systemctl --user stop "${TUNNEL_SVC}" || true
   systemctl --user stop "${MCP_SVC}" || true
   start_stack
+  curl --fail --silent "${VERSIONZ_URL}"
+  echo ""
+  echo "ChatGPT connector schema is not verified by local doctor."
+  echo "After tool schema changes, refresh the Bee Dev MCP app actions and start a new chat."
   echo "Stack restarted"
 }
 
@@ -116,6 +125,7 @@ cmd_stop() {
 
 cmd_doctor() {
   local -a problems=()
+  local -a lines=()
   local command path
   for command in systemctl journalctl uv curl tunnel-client; do
     command -v "$command" >/dev/null 2>&1 || problems+=("required CLI missing: $command")
@@ -131,19 +141,46 @@ cmd_doctor() {
   done
   [[ -r "${TUNNEL_ENV}" ]] || problems+=("required env file missing: tunnel.env")
   systemctl --user show-environment >/dev/null 2>&1 || problems+=("systemd user manager unavailable")
-  systemctl --user is-active "${MCP_SVC}" >/dev/null 2>&1 || problems+=("service inactive: ${MCP_SVC}")
-  systemctl --user is-active "${TUNNEL_SVC}" >/dev/null 2>&1 || problems+=("service inactive: ${TUNNEL_SVC}")
-  curl --fail --silent --output /dev/null "${HEALTHZ_URL}" || problems+=("health endpoint unavailable")
-  curl --fail --silent --output /dev/null "${READYZ_URL}" || problems+=("readiness endpoint unavailable")
-  if ! check_tools; then
+
+  if curl --fail --silent --output /dev/null "${HEALTHZ_URL}"; then
+    lines+=("Local MCP health: OK")
+  else
+    problems+=("health endpoint unavailable")
+  fi
+
+  if curl --fail --silent --output /dev/null "${READYZ_URL}"; then
+    lines+=("Local MCP readiness: OK")
+  else
+    problems+=("readiness endpoint unavailable")
+  fi
+
+  if systemctl --user is-active "${MCP_SVC}" >/dev/null 2>&1; then
+    lines+=("MCP service: active")
+  else
+    problems+=("service inactive: ${MCP_SVC}")
+  fi
+
+  if check_tools; then
+    lines+=("Local MCP tool contract: OK")
+  else
     problems+=("MCP tool contract check failed")
   fi
 
+  if systemctl --user is-active "${TUNNEL_SVC}" >/dev/null 2>&1; then
+    lines+=("Tunnel service: active")
+  else
+    problems+=("service inactive: ${TUNNEL_SVC}")
+  fi
+
   if ((${#problems[@]})); then
+    for line in "${lines[@]}"; do echo "$line"; done
+    echo ""
     echo "Doctor found ${#problems[@]} problem(s):" >&2
     printf ' - %s\n' "${problems[@]}" >&2
     return 1
   fi
+  for line in "${lines[@]}"; do echo "$line"; done
+  echo "ChatGPT connector schema: NOT VERIFIED — refresh app actions after schema changes"
   echo "Doctor: all checks passed"
 }
 

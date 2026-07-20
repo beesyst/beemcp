@@ -61,7 +61,12 @@ class StartScriptTests(unittest.TestCase):
         self.python = self.repo / ".venv/bin/python"
         self.python.write_text(
             '#!/bin/sh\necho "python $*" >> "$CALL_LOG"\n'
-            '[ "${FAIL_TOOLS:-0}" = 0 ]\n',
+            'if [ "${FAIL_TOOLS:-0}" = 0 ]; then\n'
+            '  echo "OK: all 8 expected tools found"\n'
+            '  echo "tool_contract_sha256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"\n'
+            '  exit 0\n'
+            'fi\n'
+            'exit 1\n',
             encoding="utf-8",
         )
         self.python.chmod(0o755)
@@ -91,6 +96,11 @@ echo "curl $*" >> "$CALL_LOG"
 case "$*" in
   *readyz*) [ "${FAIL_READY:-0}" = 0 ] ;;
   *healthz*) [ "${FAIL_HEALTH:-0}" = 0 ] ;;
+  *versionz*)
+    [ "${FAIL_VERSIONZ:-0}" = 0 ] && \
+      echo '{"service":"bee-dev-mcp","git_head":"abc123","tool_contract_version":2,"tool_count":8,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
+    [ "${FAIL_VERSIONZ:-0}" = 0 ]
+    ;;
   *) exit 0 ;;
 esac
 ''')
@@ -241,6 +251,50 @@ esac
         ])
         self.assertNotIn("--no-pager", journal[0])
 
+    def test_up_outputs_versionz_and_refresh_warning(self) -> None:
+        self.install_units()
+        result = self.run_script("up")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ChatGPT connector schema is not verified by local doctor.", result.stdout)
+        self.assertIn("Stack is up", result.stdout)
+        calls = self.calls()
+        self.assertTrue(any("versionz" in call for call in calls))
+
+    def test_restart_outputs_versionz_and_refresh_warning(self) -> None:
+        self.install_units()
+        result = self.run_script("restart")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ChatGPT connector schema is not verified by local doctor.", result.stdout)
+        self.assertIn("Stack restarted", result.stdout)
+        calls = self.calls()
+        self.assertTrue(any("versionz" in call for call in calls))
+
+    def test_doctor_reports_tool_contract_and_chatgpt_not_verified(self) -> None:
+        self.install_units()
+        result = self.run_script("doctor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Local MCP health: OK", result.stdout)
+        self.assertIn("Local MCP readiness: OK", result.stdout)
+        self.assertIn("Local MCP tool contract: OK", result.stdout)
+        self.assertIn("Tunnel service: active", result.stdout)
+        self.assertIn("ChatGPT connector schema: NOT VERIFIED", result.stdout)
+        self.assertIn("Doctor: all checks passed", result.stdout)
+
+    def test_unchecked_chatgpt_schema_alone_not_failure(self) -> None:
+        self.install_units()
+        result = self.run_script("doctor")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("problem", result.stderr)
+
+    def test_doctor_hides_transport_exception_details(self) -> None:
+        self.install_units()
+        result = self.run_script("doctor", FAIL_TOOLS="1")
+        self.assertNotEqual(result.returncode, 0)
+        output = result.stdout + result.stderr
+        self.assertNotIn("MCP transport or protocol check failed", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("HTTP", output)
+
     def test_doctor_reports_closed_list_without_secret_values_or_mutation(self) -> None:
         self.install_units()
         result = self.run_script(
@@ -361,7 +415,9 @@ class CheckMcpToolsTests(unittest.TestCase):
         )), patch("sys.argv", ["check_mcp_tools.py", "--url", "http://test/mcp"]), \
                 redirect_stdout(output), redirect_stderr(io.StringIO()):
             self.assertEqual(module.main(), 0)
-        self.assertNotIn("missing MCP tool", output.getvalue())
+        lines = output.getvalue().splitlines()
+        self.assertNotIn("missing MCP tool", lines[0])
+        self.assertTrue(any(line.startswith("tool_contract_sha256=") for line in lines))
 
     def test_missing_tools_are_individual_and_deterministic(self) -> None:
         module = self._module()
@@ -378,6 +434,28 @@ class CheckMcpToolsTests(unittest.TestCase):
             "missing MCP tool: get_review_bundle_page",
         ])
 
+    def test_unexpected_tool_fails_contract(self) -> None:
+        module = self._module()
+        error = io.StringIO()
+        found = set(module.EXPECTED_TOOLS) | {"write_project_file"}
+
+        with patch.object(
+            module,
+            "_list_tools",
+            AsyncMock(return_value=found),
+        ), patch(
+            "sys.argv",
+            ["check_mcp_tools.py", "--url", "http://test/mcp"],
+        ), redirect_stdout(
+            io.StringIO()
+        ), redirect_stderr(error):
+            self.assertEqual(module.main(), 1)
+
+        self.assertEqual(
+            error.getvalue(),
+            "unexpected MCP tool: write_project_file\n",
+        )
+
     def test_transport_failure_is_brief(self) -> None:
         module = self._module()
         error = io.StringIO()
@@ -386,7 +464,7 @@ class CheckMcpToolsTests(unittest.TestCase):
         )), patch("sys.argv", ["check_mcp_tools.py", "--url", "http://test/mcp"]), \
                 redirect_stdout(io.StringIO()), redirect_stderr(error):
             self.assertEqual(module.main(), 1)
-        self.assertEqual(error.getvalue(), "MCP transport or protocol check failed\n")
+        self.assertEqual(error.getvalue(), "")
 
 
 if __name__ == "__main__":

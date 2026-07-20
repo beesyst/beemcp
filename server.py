@@ -16,8 +16,9 @@ from typing import Any
 
 import yaml
 from mcp.types import ToolAnnotations
-from starlette.responses import PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from mcp.server.fastmcp import FastMCP
+from mcp_contract import EXPECTED_TOOLS, TOOL_CONTRACT_VERSION, tool_contract_fingerprint
 
 
 HERE = Path(__file__).resolve().parent
@@ -1820,6 +1821,21 @@ def search_project(target: str, query: str, mode: str) -> dict[str, Any]:
             break
 
     return {"results": results, "truncated": truncated}
+
+
+@mcp.custom_route("/versionz", methods=["GET"])
+async def _versionz(request: Any) -> JSONResponse:
+    try:
+        head = _run_git(["git", "rev-parse", "HEAD"], HERE).strip()
+    except RuntimeError:
+        head = "unknown"
+    return JSONResponse({
+        "service": "bee-dev-mcp",
+        "git_head": head,
+        "tool_contract_version": TOOL_CONTRACT_VERSION,
+        "tool_count": len(EXPECTED_TOOLS),
+        "tool_contract_sha256": tool_contract_fingerprint(EXPECTED_TOOLS),
+    })
 
 
 @mcp.custom_route("/healthz", methods=["GET"])
