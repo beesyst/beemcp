@@ -268,6 +268,7 @@ class StaticAcceptanceTests(unittest.TestCase):
                 "  max_context_chars: 160000\n"
                 "  max_tree_entries: 4000\n"
                 "  max_search_results: 200\n"
+                "  max_review_page_chars: 30000\n"
                 "deny_paths: []\n"
                 "projects:\n"
                 f"  test-proj:\n"

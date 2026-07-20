@@ -75,6 +75,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths:\n"
             '  - ".env"\n'
             '  - ".env.*"\n'
@@ -323,8 +324,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        result = mod.get_review_bundle(target="rb_commit", mode="A")
-        self.assertIn("feature.txt", result["changed_files"])
+        import json
+        _r = mod.get_review_manifest(target="rb_commit", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("feature.txt", manifest["changed_files"])
 
     def test_bundle_includes_staged_changes(self) -> None:
         repo = self._init_repo("rb_staged")
@@ -340,8 +343,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        result = mod.get_review_bundle(target="rb_staged", mode="A")
-        self.assertIn("staged.txt", result["changed_files"])
+        import json
+        _r = mod.get_review_manifest(target="rb_staged", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("staged.txt", manifest["changed_files"])
 
     def test_bundle_includes_unstaged_changes(self) -> None:
         repo = self._init_repo("rb_unstaged")
@@ -356,8 +361,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        result = mod.get_review_bundle(target="rb_unstaged", mode="A")
-        self.assertIn("base.txt", result["changed_files"])
+        import json
+        _r = mod.get_review_manifest(target="rb_unstaged", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("base.txt", manifest["changed_files"])
 
     def test_bundle_includes_safe_untracked_text_files(self) -> None:
         repo = self._init_repo("rb_untracked")
@@ -372,8 +379,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        result = mod.get_review_bundle(target="rb_untracked", mode="A")
-        self.assertIn("new_file.txt", result["untracked_files"])
+        import json
+        _r = mod.get_review_manifest(target="rb_untracked", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("new_file.txt", manifest["untracked"])
 
     def test_bundle_marks_deleted_file(self) -> None:
         repo = self._init_repo("rb_deleted")
@@ -391,9 +400,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_deleted", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_deleted", mode="A")
-        self.assertIn("todelete.txt", result["deleted_files"])
-        self.assertIn("todelete.txt", result["diff"])
+        self.assertIn("todelete.txt", manifest["deleted"])
+        self.assertIn("todelete.txt", result["content"])
 
     def test_bundle_marks_rename(self) -> None:
         repo = self._init_repo("rb_rename")
@@ -411,13 +423,15 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
-        result = mod.get_review_bundle(target="rb_rename", mode="A")
+        import json
+        _r = mod.get_review_manifest(target="rb_rename", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         self.assertTrue(
             any(
                 r["from"] == "old.txt" and r["to"] == "new.txt"
-                for r in result["renamed_files"]
+                for r in manifest["renamed"]
             ),
-            msg=f"No rename old.txt->new.txt in {result['renamed_files']}",
+            msg=f"No rename old.txt->new.txt in {manifest['renamed']}",
         )
 
     def test_bundle_returns_current_changed_text_file_contents(self) -> None:
@@ -433,9 +447,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_contents", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_contents", mode="A")
-        self.assertIn("base.txt", result["file_contents"])
-        self.assertEqual(result["file_contents"]["base.txt"], "updated content")
+        self.assertIn("base.txt", manifest["changed_files"])
+        self.assertIn("updated content", result["content"])
 
     def test_untracked_env_absent_from_diff_and_file_contents(self) -> None:
         repo = self._init_repo("rb_deny")
@@ -450,10 +467,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_deny", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_deny", mode="A")
-        self.assertNotIn(".env", result["file_contents"])
-        self.assertIn(".env", result["redacted_paths"])
-        self.assertNotIn(".env", result.get("diff", ""))
+        self.assertIn(".env", manifest["redacted_paths"])
+        self.assertNotIn(".env", result.get("content", ""))
 
     def test_tracked_nested_env_absent_from_diff_and_file_contents(self) -> None:
         repo = self._init_repo("rb_nest_env")
@@ -473,10 +492,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_nest_env", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_nest_env", mode="A")
-        self.assertNotIn("sub/.env", result["file_contents"])
-        self.assertIn("sub/.env", result["redacted_paths"])
-        self.assertNotIn("sub/.env", result.get("diff", ""))
+        self.assertIn("sub/.env", manifest["redacted_paths"])
+        self.assertNotIn("sub/.env", result.get("content", ""))
 
     def test_untracked_alias_to_env_not_resolved(self) -> None:
         repo = self._init_repo("rb_alias")
@@ -493,8 +514,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_alias", mode="A")
-        self.assertNotIn("alias.txt", result["file_contents"])
-        self.assertNotIn("SECRET=key", result.get("diff", ""))
+        self.assertNotIn("SECRET=key", result.get("content", ""))
 
     def test_untracked_escaping_symlink_not_read(self) -> None:
         repo = self._init_repo("rb_escape")
@@ -512,8 +532,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_escape", mode="A")
-        self.assertNotIn("escape.txt", result["file_contents"])
-        self.assertNotIn("escaped", result.get("diff", ""))
+        self.assertNotIn("escaped", result.get("content", ""))
 
     def test_broken_symlink_not_read(self) -> None:
         repo = self._init_repo("rb_broken")
@@ -529,8 +548,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_broken", mode="A")
-        self.assertNotIn("broken.txt", result["file_contents"])
-        self.assertNotIn("broken.txt", result.get("diff", ""))
+        self.assertNotIn("broken.txt", result.get("content", ""))
 
     def test_tracked_binary_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_binary")
@@ -549,8 +567,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_binary", mode="A")
-        self.assertNotIn("data.bin", result["file_contents"])
-        self.assertNotIn("data.bin", result.get("diff", ""))
+        self.assertNotIn("data.bin", result.get("content", ""))
 
     def test_tracked_oversized_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_oversized")
@@ -569,12 +586,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_oversized", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_oversized", mode="A")
-        self.assertNotIn("large.txt", result["file_contents"])
-        self.assertNotIn("large.txt", result.get("diff", ""))
-        omitted_paths = {o["path"] for o in result["omitted_files"]}
+        self.assertNotIn("large.txt", result.get("content", ""))
+        omitted_paths = {o["path"] for o in manifest["omitted_files"]}
         self.assertIn("large.txt", omitted_paths,
-                      msg=f"large.txt not in omitted: {result['omitted_files']}")
+                      msg=f"large.txt not in omitted: {manifest['omitted_files']}")
 
     def test_read_project_file_rejects_absolute_path(self) -> None:
         repo = self._init_repo("rpf_abs")
@@ -799,6 +818,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 5000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  ctx_lim:\n"
@@ -852,10 +872,13 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_del_deny", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_del_deny", mode="A")
-        self.assertIn(".env", result["deleted_files"])
-        self.assertNotIn(".env", result.get("diff", ""))
-        self.assertIn(".env", result["redacted_paths"])
+        self.assertIn(".env", manifest["deleted"])
+        self.assertNotIn(".env", result.get("content", ""))
+        self.assertIn(".env", manifest["redacted_paths"])
 
     def test_shared_context_budget_files_and_related(self) -> None:
         main_repo = self._init_repo("shared_ctx")
@@ -870,6 +893,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 5000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  shared_ctx:\n"
@@ -912,16 +936,19 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="stg_ren", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="stg_ren", mode="A")
         self.assertTrue(
             any(
                 r["from"] == "old.txt" and r["to"] == "new.txt"
-                for r in result["renamed_files"]
+                for r in manifest["renamed"]
             ),
-            msg=f"No staged rename in {result['renamed_files']}",
+            msg=f"No staged rename in {manifest['renamed']}",
         )
-        self.assertIn("old.txt", result["diff"])
-        self.assertIn("new.txt", result["diff"])
+        self.assertIn("old.txt", result["content"])
+        self.assertIn("new.txt", result["content"])
 
     def test_staged_rename_both_paths_in_diff(self) -> None:
         repo = self._init_repo("stg_ren2")
@@ -937,16 +964,19 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="stg_ren2", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="stg_ren2", mode="A")
         self.assertTrue(
             any(
                 r["from"] == "old.txt" and r["to"] == "new.txt"
-                for r in result["renamed_files"]
+                for r in manifest["renamed"]
             ),
-            msg=f"No staged rename in {result['renamed_files']}",
+            msg=f"No staged rename in {manifest['renamed']}",
         )
-        self.assertIn("old.txt", result["diff"])
-        self.assertIn("new.txt", result["diff"])
+        self.assertIn("old.txt", result["content"])
+        self.assertIn("new.txt", result["content"])
 
     def test_rename_from_denied_path_not_leaked(self) -> None:
         repo = self._init_repo("den_ren")
@@ -964,21 +994,24 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '        files: []\n'
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="den_ren", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="den_ren", mode="A")
-        self.assertNotIn("SECRET=key", result.get("diff", ""))
-        self.assertNotIn("config.env", result.get("file_contents", {}))
+        self.assertNotIn("SECRET=key", result.get("content", ""))
         self.assertTrue(
-            any(".env" in p for p in result.get("redacted_paths", [])),
-            msg=f".env not in redacted_paths: {result.get('redacted_paths')}",
+            any(".env" in p for p in manifest.get("redacted_paths", [])),
+            msg=f".env not in redacted_paths: {manifest.get('redacted_paths')}",
         )
         self.assertTrue(
-            any("config.env" in p for p in result.get("redacted_paths", [])),
-            msg=f"config.env not in redacted_paths: {result.get('redacted_paths')}",
+            any("config.env" in p for p in manifest.get("redacted_paths", [])),
+            msg=f"config.env not in redacted_paths: {manifest.get('redacted_paths')}",
         )
 
     def _chunk_config(self, repo: Path, name: str,
                       max_file_bytes: int = 100,
-                      max_context_chars: int = 200) -> str:
+                      max_context_chars: int = 200,
+                      max_review_page_chars: int = 30000) -> str:
         return (
             "limits:\n"
             f"  max_file_bytes: {max_file_bytes}\n"
@@ -986,6 +1019,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"  max_context_chars: {max_context_chars}\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            f"  max_review_page_chars: {max_review_page_chars}\n"
             "deny_paths:\n"
             '  - ".env"\n'
             '  - "**/secret/**"\n'
@@ -1114,6 +1148,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  srch_ovr:\n"
@@ -1145,6 +1180,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 100\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  rpf_longln:\n"
@@ -1189,6 +1225,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 3500\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  gpc_ctxlim:\n"
@@ -1226,6 +1263,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 50000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  rel_omit_main:\n"
@@ -1272,6 +1310,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 200\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 4\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  srch_segments:\n"
@@ -1305,6 +1344,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 500\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  srch_total:\n"
@@ -1337,6 +1377,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 50000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  rb_omit_ctx:\n"
@@ -1358,19 +1399,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="rb_omit_ctx", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_omit_ctx", mode="A")
 
-        self.assertIn("omitted_files", result)
-        self.assertIn("related_omitted_files", result)
-        omitted_paths = {o["path"] for o in result["omitted_files"]}
-        self.assertIn("docs/ROADMAP.md", omitted_paths,
-                      msg="oversized own ROADMAP should be in omitted_files")
-        related_omit_paths = {o["path"] for o in result["related_omitted_files"]}
-        self.assertIn("docs/ROADMAP.md", related_omit_paths,
-                      msg="oversized related ROADMAP should be in related_omitted_files")
-        related_targets = {o["target"] for o in result["related_omitted_files"]}
-        self.assertIn("rb_omit_rel", related_targets,
-                      msg="related target should be rb_omit_rel")
+        self.assertIn("omitted_files", manifest)
+        self.assertNotIn("related_omitted_files", result)
+        self.assertNotIn("context", result)
+        self.assertNotIn("related_context", result)
+        self.assertNotIn("git_status", result)
 
     def test_search_serialized_size_respected(self) -> None:
         repo = self._init_repo("srch_ser")
@@ -1389,6 +1427,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 200\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  srch_ser:\n"
@@ -1426,6 +1465,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 5000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
+            "  max_review_page_chars: 30000\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  rb_rename_oversized:\n"
@@ -1437,6 +1477,13 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
 
         mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(
+            target="rb_rename_oversized",
+            mode="A",
+            cursor="",
+        )
+        manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(
             target="rb_rename_oversized",
             mode="A",
@@ -1446,18 +1493,1486 @@ class ReadOnlyToolsTests(unittest.TestCase):
             any(
                 rename["from"] == "old.txt"
                 and rename["to"] == "new.txt"
-                for rename in result["renamed_files"]
+                for rename in manifest["renamed"]
             )
         )
-        self.assertNotIn("old.txt", result["diff"])
-        self.assertNotIn("new.txt", result["diff"])
+        self.assertNotIn("old.txt", result["content"])
+        self.assertNotIn("new.txt", result["content"])
         self.assertTrue(
             any(
                 item["path"] == "new.txt"
                 and item["reason"] == "oversized"
-                for item in result["omitted_files"]
+                for item in manifest["omitted_files"]
             )
         )
+
+
+    def test_config_missing_max_review_page_chars_fails_fast(self) -> None:
+        repo = self._init_repo("cfg_no_page")
+        self._commit_file(repo, "f.txt", "x")
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 200000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  cfg_no_page:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        with self.assertRaises(RuntimeError):
+            self._import_server(config)
+
+    def test_config_max_review_page_chars_not_integer_fails(self) -> None:
+        repo = self._init_repo("cfg_not_int")
+        self._commit_file(repo, "f.txt", "x")
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 200000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: not_an_int\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  cfg_not_int:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        with self.assertRaises(RuntimeError):
+            self._import_server(config)
+
+    def test_config_max_review_page_chars_non_positive_fails(self) -> None:
+        repo = self._init_repo("cfg_non_pos")
+        self._commit_file(repo, "f.txt", "x")
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 200000\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 0\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  cfg_non_pos:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        with self.assertRaises(RuntimeError):
+            self._import_server(config)
+
+    def test_manifest_single_committed_file(self) -> None:
+        repo = self._init_repo("man_one")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        self._commit_file(repo, "new.txt", "new content")
+        config = self._make_project_yml(
+            '  man_one:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_one", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertEqual(manifest["target"], "man_one")
+        self.assertIn("new.txt", manifest["committed"])
+        self.assertIn("new.txt", manifest["changed_files"])
+        self.assertEqual(manifest["committed"], ["new.txt"])
+
+    def test_manifest_separates_committed_staged_unstaged_untracked(self) -> None:
+        repo = self._init_repo("man_sep")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "committed.txt", "committed")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "committed.txt").write_text("modified committed", encoding="utf-8")
+        _run_git(["git", "add", "committed.txt"], repo)
+        _run_git(["git", "commit", "-m", "modify committed"], repo)
+        (repo / "staged.txt").write_text("staged", encoding="utf-8")
+        _run_git(["git", "add", "staged.txt"], repo)
+        (repo / "base.txt").write_text("unstaged", encoding="utf-8")
+        (repo / "untracked.txt").write_text("untracked", encoding="utf-8")
+        config = self._make_project_yml(
+            '  man_sep:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_sep", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("committed.txt", manifest["committed"])
+        self.assertIn("staged.txt", manifest["staged"])
+        self.assertIn("base.txt", manifest["unstaged"])
+        self.assertIn("untracked.txt", manifest["untracked"])
+
+    def test_manifest_contains_deleted(self) -> None:
+        repo = self._init_repo("man_del")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "todel.txt", "delete me")
+        _run_git(["git", "checkout", "-b", "del-branch"], repo)
+        _run_git(["git", "rm", "todel.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete"], repo)
+        config = self._make_project_yml(
+            '  man_del:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_del", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("todel.txt", manifest["deleted"])
+
+    def test_manifest_contains_renamed(self) -> None:
+        repo = self._init_repo("man_ren")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "old.txt", "rename me")
+        _run_git(["git", "checkout", "-b", "ren-branch"], repo)
+        _run_git(["git", "mv", "old.txt", "new.txt"], repo)
+        _run_git(["git", "commit", "-m", "rename"], repo)
+        config = self._make_project_yml(
+            '  man_ren:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_ren", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertTrue(
+            any(r["from"] == "old.txt" and r["to"] == "new.txt" for r in manifest["renamed"])
+        )
+
+    def test_manifest_returns_base_branch_and_merge_base(self) -> None:
+        repo = self._init_repo("man_mb")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        self._commit_file(repo, "new.txt", "new")
+        config = self._make_project_yml(
+            '  man_mb:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_mb", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertEqual(manifest["base_branch"], "main")
+        self.assertTrue(len(manifest["merge_base"]) > 0)
+        self.assertNotEqual(manifest["head"], manifest["merge_base"])
+
+    def test_manifest_changed_files_deterministic_no_duplicates(self) -> None:
+        repo = self._init_repo("man_dedup")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "both.txt", "both")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "both.txt").write_text("modified in branch", encoding="utf-8")
+        _run_git(["git", "add", "both.txt"], repo)
+        _run_git(["git", "commit", "-m", "modify both"], repo)
+        (repo / "both.txt").write_text("unstaged change", encoding="utf-8")
+        config = self._make_project_yml(
+            '  man_dedup:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_dedup", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertEqual(len(manifest["changed_files"]), 1)
+        self.assertEqual(manifest["changed_files"], ["both.txt"])
+
+    def test_manifest_no_file_contents(self) -> None:
+        repo = self._init_repo("man_no_fc")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        self._commit_file(repo, "data.txt", "sensitive data")
+        config = self._make_project_yml(
+            '  man_no_fc:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="man_no_fc", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertNotIn("file_contents", manifest)
+        self.assertNotIn("diff", manifest)
+        self.assertNotIn("sensitive data", str(manifest))
+
+    def test_denied_file_not_in_safe_diff(self) -> None:
+        repo = self._init_repo("pag_deny")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / ".env").write_text("SECRET=key", encoding="utf-8")
+        config = self._make_project_yml(
+            '  pag_deny:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_deny", mode="A")
+        self.assertNotIn("SECRET=key", page["content"])
+
+    def test_binary_file_not_in_safe_diff(self) -> None:
+        repo = self._init_repo("pag_bin")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "bin-branch"], repo)
+        (repo / "data.bin").write_bytes(b"\x00\x01\x02")
+        _run_git(["git", "add", "data.bin"], repo)
+        _run_git(["git", "commit", "-m", "add binary"], repo)
+        config = self._make_project_yml(
+            '  pag_bin:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_bin", mode="A")
+        self.assertNotIn("data.bin", page["content"])
+
+    def test_escaping_symlink_not_read(self) -> None:
+        repo = self._init_repo("pag_esc")
+        self._commit_file(repo, "base.txt", "base")
+        escape_target = self.root / "outside_pag.txt"
+        escape_target.write_text("escaped", encoding="utf-8")
+        (repo / "escape.txt").symlink_to(os.path.relpath(escape_target, repo))
+        config = self._make_project_yml(
+            '  pag_esc:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_esc", mode="A")
+        self.assertNotIn("escaped", page["content"])
+
+    def test_oversized_file_omitted(self) -> None:
+        repo = self._init_repo("pag_ovr")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "ovr-branch"], repo)
+        large = "x" * 300000
+        (repo / "large.txt").write_text(large, encoding="utf-8")
+        _run_git(["git", "add", "large.txt"], repo)
+        _run_git(["git", "commit", "-m", "add large"], repo)
+        config = self._make_project_yml(
+            '  pag_ovr:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="pag_ovr", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        omitted_paths = {o["path"] for o in manifest["omitted_files"]}
+        self.assertIn("large.txt", omitted_paths)
+
+    def test_small_diff_one_page(self) -> None:
+        repo = self._init_repo("pag_one")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        self._commit_file(repo, "small.txt", "hello")
+        config = self._make_project_yml(
+            '  pag_one:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_one", mode="A")
+        self.assertFalse(page["has_more"])
+        self.assertIsNone(page["next_cursor"])
+        self.assertEqual(page["page_number"], 0)
+        self.assertEqual(page["total_pages"], 1)
+        self.assertIn("small.txt", page["content"])
+
+    def test_large_diff_multiple_pages(self) -> None:
+        repo = self._init_repo("pag_large")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "large-branch"], repo)
+        big_content = "\n".join(f"LINE {i} " + "x" * 150 for i in range(2000))
+        (repo / "big.txt").write_text(big_content, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big file"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 500\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  pag_large:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        all_content: list[str] = []
+        cursor = ""
+        pages = 0
+        while True:
+            page = mod.get_review_bundle_page(
+                target="pag_large", mode="A", cursor=cursor
+            )
+            self.assertLessEqual(len(page["content"]), 500)
+            all_content.append(page["content"])
+            pages += 1
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+            self.assertIsNotNone(cursor)
+        self.assertGreater(pages, 1)
+        full_diff = "".join(all_content)
+        self.assertIn("big.txt", full_diff)
+        self.assertIn("LINE 0", full_diff)
+        self.assertIn("LINE 1999", full_diff)
+
+    def test_cursor_validation_malformed(self) -> None:
+        repo = self._init_repo("pag_cv")
+        self._commit_file(repo, "base.txt", "base")
+        config = self._make_project_yml(
+            '  pag_cv:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        with self.assertRaises(ValueError):
+            mod.get_review_bundle_page(target="pag_cv", mode="A", cursor="not-valid-base64!!!")
+
+    def test_cursor_wrong_target_rejected(self) -> None:
+        repo_a = self._init_repo("pag_wta")
+        self._commit_file(repo_a, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feat"], repo_a)
+        big_a = "\n".join(f"LINE {i} " + "x" * 200 for i in range(500))
+        (repo_a / "big_a.txt").write_text(big_a, encoding="utf-8")
+        _run_git(["git", "add", "big_a.txt"], repo_a)
+        _run_git(["git", "commit", "-m", "add big"], repo_a)
+        repo_b = self._init_repo("pag_wtb")
+        self._commit_file(repo_b, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feat"], repo_b)
+        (repo_b / "big_b.txt").write_text(big_a, encoding="utf-8")
+        _run_git(["git", "add", "big_b.txt"], repo_b)
+        _run_git(["git", "commit", "-m", "add big"], repo_b)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  pag_wta:\n"
+            f"    source: {repo_a}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+            f"  pag_wtb:\n"
+            f"    source: {repo_b}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_wta", mode="A", cursor="")
+        self.assertTrue(page["has_more"])
+        bad_cursor = page["next_cursor"]
+        self.assertIsNotNone(bad_cursor)
+        with self.assertRaises(ValueError):
+            mod.get_review_bundle_page(
+                target="pag_wtb", mode="A", cursor=bad_cursor
+            )
+
+    def test_cursor_stale_snapshot_rejected(self) -> None:
+        repo = self._init_repo("pag_stale")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} xxxxx" for i in range(100))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  pag_stale:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_stale", mode="A", cursor="")
+        old_cursor = page["next_cursor"]
+        self.assertIsNotNone(old_cursor)
+        (repo / "big.txt").write_text(big + "\nEXTRA", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            mod.get_review_bundle_page(
+                target="pag_stale", mode="A", cursor=old_cursor
+            )
+
+    def test_committed_diff_present(self) -> None:
+        repo = self._init_repo("diff_commit")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        self._commit_file(repo, "new.txt", "committed change")
+        config = self._make_project_yml(
+            '  diff_commit:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_commit", mode="A")
+        self.assertIn("new.txt", page["content"])
+
+    def test_staged_diff_present(self) -> None:
+        repo = self._init_repo("diff_stag")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "staged.txt").write_text("staged change", encoding="utf-8")
+        _run_git(["git", "add", "staged.txt"], repo)
+        config = self._make_project_yml(
+            '  diff_stag:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_stag", mode="A")
+        self.assertIn("staged.txt", page["content"])
+
+    def test_unstaged_diff_present(self) -> None:
+        repo = self._init_repo("diff_uns")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "base.txt").write_text("unstaged change", encoding="utf-8")
+        config = self._make_project_yml(
+            '  diff_uns:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_uns", mode="A")
+        self.assertIn("base.txt", page["content"])
+
+    def test_untracked_safe_file_diff_present(self) -> None:
+        repo = self._init_repo("diff_untr")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "untracked.txt").write_text("untracked content", encoding="utf-8")
+        config = self._make_project_yml(
+            '  diff_untr:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_untr", mode="A")
+        self.assertIn("untracked.txt", page["content"])
+
+    def test_deleted_safe_file_diff_present(self) -> None:
+        repo = self._init_repo("diff_del")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "todel.txt", "delete me")
+        _run_git(["git", "checkout", "-b", "del-branch"], repo)
+        _run_git(["git", "rm", "todel.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete"], repo)
+        config = self._make_project_yml(
+            '  diff_del:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_del", mode="A")
+        self.assertIn("todel.txt", page["content"])
+
+    def test_renamed_safe_file_diff_present(self) -> None:
+        repo = self._init_repo("diff_ren")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "old.txt", "rename me")
+        _run_git(["git", "checkout", "-b", "ren-branch"], repo)
+        _run_git(["git", "mv", "old.txt", "new.txt"], repo)
+        _run_git(["git", "commit", "-m", "rename"], repo)
+        config = self._make_project_yml(
+            '  diff_ren:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="diff_ren", mode="A")
+        self.assertIn("old.txt", page["content"])
+        self.assertIn("new.txt", page["content"])
+
+    def test_max_diff_chars_truncation_explicit(self) -> None:
+        repo = self._init_repo("trunc_diff")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "big-branch"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(2000))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 1000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 500\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  trunc_diff:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        all_pages: list[str] = []
+        cursor = ""
+        while True:
+            page = mod.get_review_bundle_page(
+                target="trunc_diff", mode="A", cursor=cursor
+            )
+            all_pages.append(page["content"])
+            if not page["has_more"]:
+                self.assertFalse(page["has_more"])
+                break
+            cursor = page["next_cursor"]
+        full = "".join(all_pages)
+        self.assertIn("[TRUNCATED at 1000 characters]", full)
+
+    def test_get_review_bundle_returns_bounded_first_page_and_metadata(self) -> None:
+        repo = self._init_repo("bundle_bounded")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 100 for i in range(500))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  bundle_bounded:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        result = mod.get_review_bundle(target="bundle_bounded", mode="A")
+        self.assertEqual(result["protocol"], "paginated")
+        self.assertIn("content", result)
+        self.assertIn("cursor", result)
+        self.assertIn("next_cursor", result)
+        self.assertIn("has_more", result)
+        self.assertIn("page_number", result)
+        self.assertIn("total_pages", result)
+        self.assertIn("truncated", result)
+        self.assertIn("snapshot_id", result)
+        self.assertNotIn("changed_files", result)
+        self.assertEqual(result["page_number"], 0)
+        self.assertTrue(result["has_more"])
+
+    def test_tool_list_contains_new_review_tools(self) -> None:
+        repo = self._init_repo("tl_check")
+        self._commit_file(repo, "f.txt", "x")
+        config = self._make_project_yml(
+            '  tl_check:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        tools = mod.mcp._tool_manager.list_tools()
+        names = [t.name for t in tools]
+        self.assertIn("get_review_manifest", names)
+        self.assertIn("get_review_bundle_page", names)
+        self.assertIn("get_review_bundle", names)
+        self.assertIn("read_project_file", names)
+        self.assertIn("list_projects", names)
+        self.assertIn("list_worktrees", names)
+        self.assertIn("get_project_context", names)
+        self.assertIn("search_project", names)
+
+
+    def test_unstaged_deleted_safe_file_in_diff(self) -> None:
+        repo = self._init_repo("udel_safe")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "todel.txt", "delete me unstaged")
+        (repo / "todel.txt").unlink()
+        config = self._make_project_yml(
+            '  udel_safe:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="udel_safe", mode="A", cursor="")
+        self.assertIn("todel.txt", page["content"])
+
+    def test_staged_deleted_safe_file_in_diff(self) -> None:
+        repo = self._init_repo("sdel_safe")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "todel.txt", "delete me staged")
+        _run_git(["git", "rm", "todel.txt"], repo)
+        config = self._make_project_yml(
+            '  sdel_safe:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="sdel_safe", mode="A", cursor="")
+        self.assertIn("todel.txt", page["content"])
+
+    def test_deleted_binary_no_crash(self) -> None:
+        repo = self._init_repo("dbin_nocrash")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "data.bin").write_bytes(b"\x00\xff\xfe\xff\x00\x01\x02")
+        _run_git(["git", "add", "data.bin"], repo)
+        _run_git(["git", "commit", "-m", "add binary"], repo)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "data.bin"], repo)
+        _run_git(["git", "commit", "-m", "delete binary"], repo)
+        config = self._make_project_yml(
+            '  dbin_nocrash:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="dbin_nocrash", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("data.bin", manifest["deleted"])
+        omit_reasons = {(o["path"], o["reason"]) for o in manifest["omitted_files"]}
+        self.assertIn(("data.bin", "binary"), omit_reasons)
+        page = mod.get_review_bundle_page(target="dbin_nocrash", mode="A", cursor="")
+        self.assertNotIn("data.bin", page.get("content", ""))
+
+    def test_deleted_binary_oversized_in_omitted(self) -> None:
+        repo = self._init_repo("dbin_omit")
+        self._commit_file(repo, "base.txt", "base")
+        large = "x" * 300000
+        self._commit_file(repo, "large.txt", large)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "large.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete large"], repo)
+        config = self._make_project_yml(
+            '  dbin_omit:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="dbin_omit", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        omitted_paths = {o["path"] for o in manifest["omitted_files"]}
+        self.assertIn("large.txt", omitted_paths)
+
+    def test_deleted_blob_byte_safety(self) -> None:
+        repo = self._init_repo("dblob_bytes")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "safe.txt", "safe text to delete")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "safe.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete safe"], repo)
+        config = self._make_project_yml(
+            '  dblob_bytes:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="dblob_bytes", mode="A", cursor="")
+        self.assertIn("safe.txt", page["content"])
+
+    def test_truncation_change_invalidates_cursor(self) -> None:
+        repo = self._init_repo("trunc_inv")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(2000))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 1000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  trunc_inv:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="trunc_inv", mode="A", cursor="")
+        old_cursor = page["next_cursor"]
+        self.assertIsNotNone(old_cursor)
+        lines = big.splitlines()
+        lines[-1] = "LINE 1999 " + "y" * 200
+        (repo / "big.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            mod.get_review_bundle_page(
+                target="trunc_inv", mode="A", cursor=old_cursor
+            )
+
+    def test_cursor_wrong_mode_rejected(self) -> None:
+        repo = self._init_repo("pag_wmode")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(500))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  pag_wmode:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+            f"      B:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="pag_wmode", mode="A", cursor="")
+        bad_cursor = page["next_cursor"]
+        self.assertIsNotNone(bad_cursor)
+        with self.assertRaises(ValueError):
+            mod.get_review_bundle_page(
+                target="pag_wmode", mode="B", cursor=bad_cursor
+            )
+
+    def test_get_review_bundle_no_full_manifest(self) -> None:
+        repo = self._init_repo("bdl_no_man")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "new.txt").write_text("new", encoding="utf-8")
+        _run_git(["git", "add", "new.txt"], repo)
+        _run_git(["git", "commit", "-m", "add new"], repo)
+        config = self._make_project_yml(
+            '  bdl_no_man:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        result = mod.get_review_bundle(target="bdl_no_man", mode="A")
+        self.assertNotIn("changed_files", result)
+        self.assertNotIn("committed", result)
+        self.assertNotIn("staged", result)
+        self.assertNotIn("unstaged", result)
+        self.assertNotIn("untracked", result)
+        self.assertNotIn("deleted", result)
+        self.assertNotIn("renamed", result)
+        self.assertNotIn("redacted_paths", result)
+        self.assertNotIn("omitted_files", result)
+        self.assertIn("content", result)
+        self.assertIn("next_cursor", result)
+
+    def test_truncated_result_within_max_diff_chars(self) -> None:
+        repo = self._init_repo("trunc_budget")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(2000))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 1000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 500\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  trunc_budget:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        full = ""
+        cursor = ""
+        while True:
+            page = mod.get_review_bundle_page(
+                target="trunc_budget", mode="A", cursor=cursor
+            )
+            full += page["content"]
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        self.assertLessEqual(len(full), 1000)
+        self.assertIn("[TRUNCATED at 1000 characters]", full)
+
+    def test_staged_delete_uses_head_blob_for_safety(self) -> None:
+        repo = self._init_repo("sdel_head_blob")
+        self._commit_file(repo, "base.txt", "base")
+        small = "safe text"
+        self._commit_file(repo, "safe.txt", small)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        large = "x" * 300000
+        (repo / "safe.txt").write_text(large, encoding="utf-8")
+        _run_git(["git", "add", "safe.txt"], repo)
+        _run_git(["git", "commit", "-m", "make oversized"], repo)
+        _run_git(["git", "rm", "safe.txt"], repo)
+        config = self._make_project_yml(
+            '  sdel_head_blob:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="sdel_head_blob", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("safe.txt", manifest["deleted"])
+        omitted_paths = {o["path"] for o in manifest["omitted_files"]}
+        self.assertIn("safe.txt", omitted_paths)
+
+    def test_unstaged_delete_uses_index_blob_for_safety(self) -> None:
+        repo = self._init_repo("udel_idx_blob")
+        self._commit_file(repo, "base.txt", "base")
+        self._commit_file(repo, "file.txt", "small")
+        large = "x" * 300000
+        (repo / "file.txt").write_text(large, encoding="utf-8")
+        _run_git(["git", "add", "file.txt"], repo)
+        (repo / "file.txt").unlink()
+        config = self._make_project_yml(
+            '  udel_idx_blob:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="udel_idx_blob", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        omitted_paths = {o["path"] for o in manifest["omitted_files"]}
+        self.assertIn("file.txt", omitted_paths)
+        page = mod.get_review_bundle_page(target="udel_idx_blob", mode="A", cursor="")
+        self.assertNotIn("file.txt", page["content"])
+
+    def test_small_max_diff_chars_remains_bounded(self) -> None:
+        repo = self._init_repo("small_mdc")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(2000))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 10\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  small_mdc:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        full = ""
+        cursor = ""
+        while True:
+            page = mod.get_review_bundle_page(
+                target="small_mdc", mode="A", cursor=cursor
+            )
+            full += page["content"]
+            self.assertTrue(page["truncated"])
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        self.assertLessEqual(len(full), 10)
+
+    def test_manifest_multiple_pages_reassemble(self) -> None:
+        repo = self._init_repo("man_multi")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        for i in range(30):
+            (repo / f"file{i:02d}.txt").write_text(f"content {i} " + "x" * 3000, encoding="utf-8")
+            _run_git(["git", "add", f"file{i:02d}.txt"], repo)
+        _run_git(["git", "commit", "-m", "add many files"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  man_multi:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        import json
+        full = ""
+        cursor = ""
+        pages = 0
+        while True:
+            _r = mod.get_review_manifest(
+                target="man_multi", mode="A", cursor=cursor
+            )
+            full += _r["content"]
+            pages += 1
+            if not _r["has_more"]:
+                self.assertIsNone(_r["next_cursor"])
+                break
+            cursor = _r["next_cursor"]
+        self.assertGreater(pages, 1)
+        manifest = json.loads(full)
+        self.assertIn("changed_files", manifest)
+        self.assertEqual(len(manifest["changed_files"]), 30)
+        self.assertEqual(len(set(manifest["changed_files"])), 30)
+
+    def test_large_committed_diff_bounded(self) -> None:
+        repo = self._init_repo("lg_comm")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        big = "\n".join(f"LINE {i} " + "x" * 200 for i in range(5000))
+        (repo / "big.txt").write_text(big, encoding="utf-8")
+        _run_git(["git", "add", "big.txt"], repo)
+        _run_git(["git", "commit", "-m", "add big"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 500\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 500\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  lg_comm:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        full = ""
+        cursor = ""
+        while True:
+            page = mod.get_review_bundle_page(
+                target="lg_comm", mode="A", cursor=cursor
+            )
+            full += page["content"]
+            self.assertTrue(page["truncated"])
+            if not page["has_more"]:
+                break
+            cursor = page["next_cursor"]
+        self.assertLessEqual(len(full), 500)
+        self.assertIn("[TRUNCATED", full)
+
+    def test_large_untracked_file_bounded(self) -> None:
+        repo = self._init_repo("lg_untr")
+        self._commit_file(repo, "base.txt", "base")
+        large = "x" * 300000
+        (repo / "huge.txt").write_text(large, encoding="utf-8")
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 500000\n"
+            "  max_diff_chars: 200\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 200\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  lg_untr:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="lg_untr", mode="A", cursor="")
+        self.assertTrue(page["truncated"])
+        self.assertLessEqual(len(page["content"]), 200)
+        self.assertIn("huge.txt", page["content"])
+
+    def test_git_failure_not_silent(self) -> None:
+        repo = self._init_repo("git_fail")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "--orphan", "orphan"], repo)
+        _run_git(["git", "commit", "-m", "orphan"], repo)
+        config = self._make_project_yml(
+            '  git_fail:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        with self.assertRaises(RuntimeError):
+            mod.get_review_bundle_page(target="git_fail", mode="A", cursor="")
+
+    def test_build_diff_stops_after_budget(self) -> None:
+        repo = self._init_repo("bdgt_stop")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "f.txt").write_text("hello world", encoding="utf-8")
+        _run_git(["git", "add", "f.txt"], repo)
+        _run_git(["git", "commit", "-m", "add f"], repo)
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 5\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 100\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  bdgt_stop:\n"
+            f"    source: {repo}\n"
+            f"    base_branch: main\n"
+            f"    context_modes:\n"
+            f"      A:\n"
+            f"        files: []\n"
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="bdgt_stop", mode="A", cursor="")
+        self.assertTrue(page["truncated"])
+        self.assertLessEqual(len(page["content"]), 5)
+
+    def test_stream_git_failure_propagates(self) -> None:
+        import unittest.mock
+        repo = self._init_repo("strm_fail")
+        self._commit_file(repo, "base.txt", "base")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "f.txt").write_text("hello", encoding="utf-8")
+        _run_git(["git", "add", "f.txt"], repo)
+        _run_git(["git", "commit", "-m", "add f"], repo)
+        config = self._make_project_yml(
+            '  strm_fail:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        inv = mod._git_inventory("strm_fail", "A")
+        with unittest.mock.patch.object(
+            mod, "_stream_git_stdout",
+            side_effect=RuntimeError("simulated stream failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                mod._build_review_diff(inv, truncate=True)
+            with self.assertRaises(RuntimeError):
+                mod._build_review_snapshot_id(inv)
+
+    def test_oversized_deleted_blob_rejected_before_read(self) -> None:
+        repo = self._init_repo("odb_rej")
+        large = "x" * 300000
+        self._commit_file(repo, "large.txt", large)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "large.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete large"], repo)
+        config = self._make_project_yml(
+            '  odb_rej:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="odb_rej", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertIn("large.txt", manifest["deleted"])
+        omit_reasons = {(o["path"], o["reason"]) for o in manifest["omitted_files"]}
+        self.assertIn(("large.txt", "oversized"), omit_reasons)
+
+    def test_unsafe_historical_blob_excluded_from_diff(self) -> None:
+        repo = self._init_repo("unsafe_hist")
+        large = "x" * 300000
+        self._commit_file(repo, "large.txt", large)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / "large.txt").write_text("small text", encoding="utf-8")
+        _run_git(["git", "add", "large.txt"], repo)
+        _run_git(["git", "commit", "-m", "make small"], repo)
+        (repo / "large.txt").write_text("staged change", encoding="utf-8")
+        _run_git(["git", "add", "large.txt"], repo)
+        (repo / "large.txt").write_text("unstaged change", encoding="utf-8")
+        config = self._make_project_yml(
+            '  unsafe_hist:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="unsafe_hist", mode="A", cursor="")
+        self.assertNotIn("large.txt", page["content"])
+
+    def test_rename_from_oversized_excluded(self) -> None:
+        repo = self._init_repo("ren_ovr_excl")
+        large = "x" * 300000
+        self._commit_file(repo, "big.txt", large)
+        _run_git(["git", "mv", "big.txt", "small.txt"], repo)
+        config = self._make_project_yml(
+            '  ren_ovr_excl:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="ren_ovr_excl", mode="A", cursor="")
+        self.assertNotIn("big.txt", page["content"])
+        self.assertNotIn("small.txt", page["content"])
+
+    def test_literal_pathspec_security(self) -> None:
+        repo = self._init_repo("lit_path")
+        (repo / ":(glob)*").write_text("safe content", encoding="utf-8")
+        _run_git(
+            ["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo
+        )
+        _run_git(["git", "commit", "-m", "add literal"], repo)
+        self._commit_file(repo, ".env", "SECRET=supersecret")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / ":(glob)*").write_text("modified safe content", encoding="utf-8")
+        _run_git(
+            ["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo
+        )
+        _run_git(["git", "commit", "-m", "modify literal"], repo)
+        (repo / ".env").write_text("SECRET=leaked", encoding="utf-8")
+        config = self._make_project_yml(
+            '  lit_path:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(target="lit_path", mode="A", cursor="")
+        self.assertIn(":(glob)*", page["content"])
+        self.assertIn("modified safe content", page["content"])
+        self.assertNotIn("SECRET=leaked", page["content"])
+        self.assertNotIn(".env", page["content"])
+
+    def test_rename_config_independence(self) -> None:
+        repo = self._init_repo("ren_conf")
+        _run_git(["git", "config", "diff.renames", "false"], repo)
+        self._commit_file(repo, "old.txt", "rename me")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "mv", "old.txt", "new.txt"], repo)
+        _run_git(["git", "commit", "-m", "rename"], repo)
+        config = self._make_project_yml(
+            '  ren_conf:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        _r = mod.get_review_manifest(target="ren_conf", mode="A", cursor="")
+        manifest = json.loads(_r["content"])
+        self.assertTrue(
+            any(
+                r["from"] == "old.txt" and r["to"] == "new.txt"
+                for r in manifest["renamed"]
+            ),
+            msg=f"rename not found with diff.renames=false: {manifest['renamed']}",
+        )
+        self.assertNotIn("old.txt", manifest.get("deleted", []))
+
+    def test_committed_delete_staged_readd_is_in_safe_diff(self) -> None:
+        repo = self._init_repo("layered_branch_staged")
+        self._commit_file(repo, "layered.txt", "committed content")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "layered.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete layered file"], repo)
+        (repo / "layered.txt").write_text("staged replacement", encoding="utf-8")
+        _run_git(["git", "add", "layered.txt"], repo)
+        config = self._make_project_yml(
+            '  layered_branch_staged:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        page = mod.get_review_bundle_page(
+            target="layered_branch_staged", mode="A", cursor=""
+        )
+        self.assertIn("layered.txt", page["content"])
+        self.assertIn("staged replacement", page["content"])
+
+    def test_staged_delete_untracked_readd_preserves_addition(self) -> None:
+        repo = self._init_repo("layered_staged_untracked")
+        self._commit_file(repo, "layered.txt", "committed content")
+        _run_git(["git", "rm", "layered.txt"], repo)
+        (repo / "layered.txt").write_text(
+            "untracked replacement", encoding="utf-8"
+        )
+        config = self._make_project_yml(
+            '  layered_staged_untracked:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        manifest_page = mod.get_review_manifest(
+            target="layered_staged_untracked", mode="A", cursor=""
+        )
+        manifest = json.loads(manifest_page["content"])
+        page = mod.get_review_bundle_page(
+            target="layered_staged_untracked", mode="A", cursor=""
+        )
+        self.assertIn("layered.txt", manifest["deleted"])
+        self.assertIn("deleted file mode", page["content"])
+        self.assertIn("new file mode", page["content"])
+        self.assertIn("untracked replacement", page["content"])
+
+    def test_multilayer_unsafe_deleted_blob_omits_path(self) -> None:
+        repo = self._init_repo("layered_unsafe_deleted")
+        old_content = "old oversized content\n" + "x" * 200001
+        self._commit_file(repo, "layered.txt", old_content)
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        _run_git(["git", "rm", "layered.txt"], repo)
+        _run_git(["git", "commit", "-m", "delete oversized file"], repo)
+        (repo / "layered.txt").write_text("safe replacement", encoding="utf-8")
+        _run_git(["git", "add", "layered.txt"], repo)
+        config = self._make_project_yml(
+            '  layered_unsafe_deleted:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        manifest_page = mod.get_review_manifest(
+            target="layered_unsafe_deleted", mode="A", cursor=""
+        )
+        manifest = json.loads(manifest_page["content"])
+        page = mod.get_review_bundle_page(
+            target="layered_unsafe_deleted", mode="A", cursor=""
+        )
+        self.assertIn(
+            ("layered.txt", "oversized"),
+            {(item["path"], item["reason"]) for item in manifest["omitted_files"]},
+        )
+        self.assertNotIn("old oversized content", page["content"])
+        self.assertNotIn("safe replacement", page["content"])
+
+    def test_nul_safe_filename_inventory_and_diff(self) -> None:
+        repo = self._init_repo("nul_safe_names")
+        path = "tab\tand\nnewline.txt"
+        self._commit_file(repo, path, "before")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        (repo / path).write_text("nul safe content", encoding="utf-8")
+        config = self._make_project_yml(
+            '  nul_safe_names:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        import json
+        manifest_page = mod.get_review_manifest(
+            target="nul_safe_names", mode="A", cursor=""
+        )
+        manifest = json.loads(manifest_page["content"])
+        page = mod.get_review_bundle_page(
+            target="nul_safe_names", mode="A", cursor=""
+        )
+        self.assertEqual(manifest["changed_files"], [path])
+        self.assertEqual(manifest["unstaged"], [path])
+        self.assertIn("nul safe content", page["content"])
+
+    def test_manifest_cursor_rejected_after_omitted_reason_changes(self) -> None:
+        repo = self._init_repo("manifest_cursor_omitted")
+        self._commit_file(repo, "base.txt", "base")
+        (repo / "opaque.dat").write_bytes(b"\x00binary")
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 100\n"
+            "  max_diff_chars: 120000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 50\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  manifest_cursor_omitted:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
+        )
+        mod = self._import_server(config)
+        first_page = mod.get_review_manifest(
+            target="manifest_cursor_omitted", mode="A", cursor=""
+        )
+        cursor = first_page["next_cursor"]
+        self.assertIsNotNone(cursor)
+        (repo / "opaque.dat").write_text("x" * 200, encoding="utf-8")
+        with self.assertRaises(ValueError):
+            mod.get_review_manifest(
+                target="manifest_cursor_omitted", mode="A", cursor=cursor
+            )
 
 
 if __name__ == "__main__":

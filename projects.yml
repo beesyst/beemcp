@@ -4,6 +4,7 @@ limits:
   max_context_chars: 160000
   max_tree_entries: 4000
   max_search_results: 200
+  max_review_page_chars: 30000
 
 deny_paths:
   - ".env"

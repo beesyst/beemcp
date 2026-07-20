@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import base64
+import codecs
 import fnmatch
+import hashlib
 import json
 import os
+import selectors
 import subprocess
+import tempfile
+import time
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -46,7 +53,7 @@ def load_config() -> dict[str, Any]:
     if not isinstance(limits, dict):
         raise RuntimeError("projects.yml must contain limits mapping")
     for key in ("max_file_bytes", "max_diff_chars", "max_context_chars",
-                 "max_tree_entries", "max_search_results"):
+                 "max_tree_entries", "max_search_results", "max_review_page_chars"):
         val = limits.get(key)
         if not isinstance(val, int) or val <= 0:
             raise RuntimeError(f"limits.{key} must be a positive integer, got {val!r}")
@@ -162,30 +169,58 @@ mcp = FastMCP(
         "All tools are read-only: no files are modified, no agents or checks are "
         "started, and no Git write operations are performed.\n\n"
         "Before providing an architecture or review answer, call get_project_context "
-        "to load the configured project files for the chosen mode. "
-        "Before final review, call get_review_bundle to obtain the current diff and "
-        "changed file contents.\n\n"
-        "omitted_files and related_omitted_files contain objects with target, path, "
-        "and reason. Files with reason 'oversized' or 'context_limit' CAN be read: "
-        "use read_project_file with the object's target and path, and with "
-        "start_line=1 (and start_column=0). The response includes next_line and "
-        "next_column — pass them as start_line and start_column in the next call. "
-        "Repeat until next_line is null. For a single line longer than "
-        "max_context_chars, next_column advances across chunks. Files with reason "
-        "'denied', 'binary', 'broken', or 'escaping' CANNOT be read and should be "
-        "skipped.\n\n"
+        "to load the configured project files for the chosen mode.\n\n"
+        "Review protocol:\n"
+        "1. list_worktrees — discover available worktrees\n"
+        "2. get_review_manifest(cursor=\"\") — get paginated Git inventory "
+        "(concatenate all content pages, parse as JSON)\n"
+        "3. Verify target, branch, base_branch, and snapshot_id\n"
+        "4. get_review_bundle_page(cursor=\"\") — get first page of paginated safe diff\n"
+        "5. Repeat with next_cursor until has_more=false\n"
+        "6. For each existing changed/untracked safe file, use read_project_file "
+        "if needed (start_line=1, start_column=0; repeat until next_line is null)\n"
+        "7. REVIEW INCOMPLETE is allowed only after exhausting bundle pagination "
+        "and per-file read_project_file fallback\n\n"
+        "Files with reason 'oversized' or 'context_limit' in omitted_files CAN be "
+        "read via read_project_file. Files with reason 'denied', 'binary', 'broken', "
+        "or 'escaping' CANNOT be read.\n\n"
         "Available tools:\n"
         "- list_projects: show allowlisted projects and their context modes\n"
         "- list_worktrees: discover Git worktrees for a project\n"
         "- get_project_context: read configured files for a target and mode\n"
-        "- get_review_bundle: get diff, changed files, and context for review\n"
+        "- get_review_manifest: paginated Git inventory (concatenate content pages, "
+        "parse as JSON; cursor protocol)\n"
+        "- get_review_bundle_page: get one page of paginated safe diff (cursor protocol)\n"
+        "- get_review_bundle: bounded compatibility shim — identity fields + first "
+        "safe diff page + pagination metadata; no inventory (use get_review_manifest "
+        "for full inventory, get_review_bundle_page to continue)\n"
         "- read_project_file: read a single file by relative path (supports "
-        "start_line and start_column for chunked reading)\n"
+        "start_line and start_column for chunked reading; deleted files must be "
+        "checked through paginated diff)\n"
         "- search_project: fixed-string search within configured boundaries"
     ),
     host="127.0.0.1",
     port=8000,
 )
+
+
+def _run_git_bytes(argv: list[str], cwd: Path, timeout: int = 30) -> bytes:
+    try:
+        cp = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"Git executable not found: {exc}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Git command timed out after {timeout}s: {' '.join(argv)}")
+    if cp.returncode != 0:
+        msg = (cp.stderr or cp.stdout or "").strip()
+        raise RuntimeError(f"Git command failed: {' '.join(argv)}: {msg}")
+    return cp.stdout
 
 
 def _run_git(argv: list[str], cwd: Path, timeout: int = 30) -> str:
@@ -208,6 +243,90 @@ def _run_git(argv: list[str], cwd: Path, timeout: int = 30) -> str:
     return cp.stdout
 
 
+def _stream_git_stdout(
+    argv: list[str],
+    cwd: Path,
+    *,
+    chunk_size: int = 65536,
+    timeout: int = 30,
+) -> Generator[bytes, None, None]:
+    if timeout <= 0:
+        raise ValueError(f"timeout must be positive, got {timeout}")
+
+    deadline = time.monotonic() + timeout
+
+    with tempfile.TemporaryFile() as stderr:
+        try:
+            proc = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=stderr,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(f"Git executable not found: {exc}")
+
+        stdout = proc.stdout
+        if stdout is None:
+            proc.kill()
+            proc.wait()
+            raise RuntimeError("Git stdout pipe is unavailable")
+
+        selector = selectors.DefaultSelector()
+        selector.register(stdout, selectors.EVENT_READ)
+        timed_out = False
+
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    proc.kill()
+                    break
+
+                if not selector.select(remaining):
+                    timed_out = True
+                    proc.kill()
+                    break
+
+                data = os.read(stdout.fileno(), chunk_size)
+                if not data:
+                    break
+
+                yield data
+        except GeneratorExit:
+            if proc.poll() is None:
+                proc.kill()
+            raise
+        finally:
+            selector.close()
+            stdout.close()
+
+            try:
+                proc.wait(timeout=max(0.1, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.kill()
+                proc.wait()
+
+            stderr.seek(0)
+            stderr_data = stderr.read(8192)
+
+        if timed_out:
+            raise RuntimeError(
+                f"Git command timed out after {timeout}s: {' '.join(argv)}"
+            )
+
+        if proc.returncode != 0:
+            message = stderr_data.decode(
+                "utf-8",
+                errors="replace",
+            ).strip()
+            raise RuntimeError(
+                f"Git command failed: {' '.join(argv)}: {message}"
+            )
+
+
 def _is_denied(rel_path: str) -> bool:
     for pattern in DENY_PATTERNS:
         if fnmatch.fnmatch(rel_path, pattern):
@@ -215,21 +334,41 @@ def _is_denied(rel_path: str) -> bool:
     return False
 
 
-def _parse_name_status(output: str) -> tuple[list[dict[str, str]], list[str]]:
+def _parse_name_status_z(output: bytes) -> tuple[list[dict[str, str]], list[str]]:
     renamed: list[dict[str, str]] = []
     names: list[str] = []
-    for line in output.splitlines():
-        if not line.strip():
+    if not output:
+        return renamed, names
+
+    fields = output.split(b"\0")
+    if fields.pop() != b"":
+        raise RuntimeError("Malformed Git name-status output")
+
+    index = 0
+    while index < len(fields):
+        status = fields[index]
+        if not status or status[:1] not in b"ACDMRTUXB":
+            raise RuntimeError("Malformed Git name-status output")
+        index += 1
+        if status[:1] in b"RC":
+            if index + 1 >= len(fields):
+                raise RuntimeError("Malformed Git name-status output")
+            from_path = os.fsdecode(fields[index])
+            to_path = os.fsdecode(fields[index + 1])
+            if not from_path or not to_path:
+                raise RuntimeError("Malformed Git name-status output")
+            renamed.append({"from": from_path, "to": to_path})
+            names.extend((from_path, to_path))
+            index += 2
             continue
-        parts = line.split("\t")
-        status = parts[0]
-        if status.startswith("R"):
-            if len(parts) >= 3:
-                renamed.append({"from": parts[1], "to": parts[2]})
-                names.append(parts[1])
-                names.append(parts[2])
-        else:
-            names.append(parts[-1])
+
+        if index >= len(fields):
+            raise RuntimeError("Malformed Git name-status output")
+        path = os.fsdecode(fields[index])
+        if not path:
+            raise RuntimeError("Malformed Git name-status output")
+        names.append(path)
+        index += 1
     return renamed, names
 
 
@@ -719,8 +858,7 @@ def get_project_context(target: str, mode: str) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
-def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
+def _git_inventory(target: str, mode: str) -> dict[str, Any]:
     resolved = _resolve_target(target)
     pcfg = PROJECTS[resolved["project"]]
     base_branch = pcfg["base_branch"]
@@ -733,39 +871,58 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
             f"Available modes: {', '.join(sorted(modes))}"
         )
 
-    status_out = _run_git(["git", "status", "--porcelain"], target_root)
-
-    # Merge-base: required; failure stops the tool
     merge_base = _run_git(
         ["git", "merge-base", "HEAD", base_branch], target_root
     ).strip()
 
-    # Collect changed file names and renames from all sources
-    branch_renamed, branch_names = _parse_name_status(
-        _run_git(
-            ["git", "diff", "--name-status", merge_base, "HEAD", "--"],
+    branch_renamed, branch_names = _parse_name_status_z(
+        _run_git_bytes(
+            [
+                "git", "diff", "--find-renames", "--name-status", "-z",
+                merge_base, "HEAD", "--",
+            ],
             target_root,
         )
     )
-    staged_renamed, staged_names = _parse_name_status(
-        _run_git(
-            ["git", "diff", "--name-status", "--cached", "--"], target_root
+    staged_renamed, staged_names = _parse_name_status_z(
+        _run_git_bytes(
+            [
+                "git", "diff", "--find-renames", "--name-status", "-z",
+                "--cached", "--",
+            ],
+            target_root,
         )
     )
-    unstaged_renamed, unstaged_names = _parse_name_status(
-        _run_git(["git", "diff", "--name-status", "--"], target_root)
+    unstaged_renamed, unstaged_names = _parse_name_status_z(
+        _run_git_bytes(
+            ["git", "diff", "--find-renames", "--name-status", "-z", "--"],
+            target_root,
+        )
     )
-    untracked_names = _run_git(
-        ["git", "ls-files", "--others", "--exclude-standard"], target_root
-    ).splitlines()
+    untracked_names = [
+        os.fsdecode(path)
+        for path in _run_git_bytes(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            target_root,
+        ).split(b"\0")
+        if path
+    ]
 
     seen_renames: set[tuple[str, str]] = set()
     renamed_files: list[dict[str, str]] = []
-    for r in branch_renamed + staged_renamed + unstaged_renamed:
-        key = (r["from"], r["to"])
-        if key not in seen_renames:
-            seen_renames.add(key)
-            renamed_files.append(r)
+    rename_sources: dict[tuple[str, str], list[str]] = {}
+    for renames, source_ref in (
+        (branch_renamed, merge_base),
+        (staged_renamed, "HEAD"),
+        (unstaged_renamed, ""),
+    ):
+        for rename in renames:
+            key = (rename["from"], rename["to"])
+            if key not in seen_renames:
+                seen_renames.add(key)
+                renamed_files.append(rename)
+                rename_sources[key] = []
+            rename_sources[key].append(source_ref)
 
     all_changed: set[str] = set()
     all_changed.update(branch_names)
@@ -773,21 +930,50 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
     all_changed.update(unstaged_names)
     all_changed.update(untracked_names)
 
-    # Deleted files from all sources
-    deleted_out = _run_git(
-        ["git", "diff", "--diff-filter=D", "--name-only", merge_base, "HEAD", "--"],
-        target_root,
-    ).splitlines()
-    staged_del = _run_git(
-        ["git", "diff", "--diff-filter=D", "--name-only", "--cached", "--"],
-        target_root,
-    ).splitlines()
-    unstaged_del = _run_git(
-        ["git", "diff", "--diff-filter=D", "--name-only", "--"], target_root
-    ).splitlines()
+    branch_deleted = [
+        os.fsdecode(path)
+        for path in _run_git_bytes(
+            [
+                "git", "diff", "--find-renames", "--diff-filter=D",
+                "--name-only", "-z", merge_base, "HEAD", "--",
+            ],
+            target_root,
+        ).split(b"\0")
+        if path
+    ]
+    staged_deleted = [
+        os.fsdecode(path)
+        for path in _run_git_bytes(
+            [
+                "git", "diff", "--find-renames", "--diff-filter=D",
+                "--name-only", "-z", "--cached", "--",
+            ],
+            target_root,
+        ).split(b"\0")
+        if path
+    ]
+    unstaged_deleted = [
+        os.fsdecode(path)
+        for path in _run_git_bytes(
+            [
+                "git", "diff", "--find-renames", "--diff-filter=D",
+                "--name-only", "-z", "--",
+            ],
+            target_root,
+        ).split(b"\0")
+        if path
+    ]
     deleted_files = list(dict.fromkeys(
-        f for f in deleted_out + staged_del + unstaged_del if f
+        branch_deleted + staged_deleted + unstaged_deleted
     ))
+    deleted_sources: dict[str, list[str]] = {}
+    for deleted, source_ref in (
+        (branch_deleted, merge_base),
+        (staged_deleted, "HEAD"),
+        (unstaged_deleted, ""),
+    ):
+        for rel in deleted:
+            deleted_sources.setdefault(rel, []).append(source_ref)
 
     deleted_denied: list[str] = []
     deleted_safe: list[str] = []
@@ -800,10 +986,9 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
     safe_paths: set[str] = set()
     redacted_paths: list[str] = list(deleted_denied)
     omitted_files: list[dict[str, str]] = []
-    file_contents: dict[str, str] = {}
 
     for rel in sorted(all_changed):
-        if rel in deleted_files:
+        if rel in deleted_files and not os.path.lexists(target_root / rel):
             continue
         meta = _classify_path_meta(target_root, rel)
         st = meta["status"]
@@ -811,9 +996,7 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
             if meta["size"] > LIMITS["max_file_bytes"]:
                 omitted_files.append({"target": target, "path": rel, "reason": "oversized"})
                 continue
-            classification = _classify_path(target_root, rel)
             safe_paths.add(rel)
-            file_contents[rel] = classification["content"]
         elif st == "denied":
             redacted_paths.append(rel)
         elif st == "escaping":
@@ -824,22 +1007,18 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
             omitted_files.append({"target": target, "path": rel, "reason": st})
 
     safe_renames: list[dict[str, str]] = []
-
     for rename in renamed_files:
         paths = (rename["from"], rename["to"])
         denied = any(
             _is_denied(path) or path in redacted_paths
             for path in paths
         )
-
         if denied:
             for path in paths:
                 safe_paths.discard(path)
-                file_contents.pop(path, None)
                 if path not in redacted_paths:
                     redacted_paths.append(path)
             continue
-
         target_meta = _classify_path_meta(target_root, rename["to"])
         if (
             target_meta["status"] != "safe"
@@ -849,42 +1028,67 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
                 if path in deleted_safe:
                     deleted_safe.remove(path)
             continue
-
         safe_renames.append(rename)
 
-    diff_pathspec_set: set[str] = set(safe_paths) | set(deleted_safe)
+    for rel in list(safe_paths):
+        for src in (
+            (merge_base if rel in branch_names else None),
+            ("HEAD" if rel in staged_names else None),
+            ("" if rel in unstaged_names else None),
+        ):
+            if src is None:
+                continue
+            cls = _classify_git_blob(target_root, f"{src}:{rel}")
+            if cls["status"] == "oversized" or cls["status"] == "binary":
+                safe_paths.discard(rel)
+                omitted_files.append({"target": target, "path": rel, "reason": cls["status"]})
+                break
 
+    blocked_renames: list[dict[str, str]] = []
+    for rename in safe_renames:
+        key = (rename["from"], rename["to"])
+        for source_ref in rename_sources[key]:
+            cls = _classify_git_blob(
+                target_root, f"{source_ref}:{rename['from']}"
+            )
+            if cls["status"] in ("binary", "oversized", "broken"):
+                blocked_renames.append(rename)
+                safe_paths.discard(rename["from"])
+                safe_paths.discard(rename["to"])
+                omitted_files.append(
+                    {
+                        "target": target,
+                        "path": rename["from"],
+                        "reason": cls["status"],
+                    }
+                )
+                break
+    for rename in blocked_renames:
+        safe_renames.remove(rename)
+
+    deleted_omitted: list[dict[str, str]] = []
+    deleted_filtered: list[str] = []
+    for rel in deleted_safe:
+        for source_ref in deleted_sources[rel]:
+            classification = _classify_deleted_blob(target_root, rel, source_ref)
+            if classification["status"] != "safe":
+                safe_paths.discard(rel)
+                deleted_omitted.append(
+                    {
+                        "target": target,
+                        "path": rel,
+                        "reason": classification["status"],
+                    }
+                )
+                break
+        else:
+            deleted_filtered.append(rel)
+
+    diff_pathspec_set: set[str] = set(safe_paths) | set(deleted_filtered)
     for rename in safe_renames:
         diff_pathspec_set.add(rename["from"])
         diff_pathspec_set.add(rename["to"])
     diff_pathspec = sorted(diff_pathspec_set)
-
-    diff_parts: list[str] = []
-
-    if diff_pathspec:
-        branch_diff = _run_git(
-            ["git", "diff", "--no-ext-diff", "--unified=8", merge_base, "HEAD", "--"]
-            + diff_pathspec,
-            target_root,
-        )
-        if branch_diff.strip():
-            diff_parts.append(branch_diff)
-
-        staged_diff = _run_git(
-            ["git", "diff", "--no-ext-diff", "--unified=8", "--cached", "--"]
-            + diff_pathspec,
-            target_root,
-        )
-        if staged_diff.strip():
-            diff_parts.append(staged_diff)
-
-        unstaged_diff = _run_git(
-            ["git", "diff", "--no-ext-diff", "--unified=8", "--"]
-            + diff_pathspec,
-            target_root,
-        )
-        if unstaged_diff.strip():
-            diff_parts.append(unstaged_diff)
 
     safe_untracked: list[str] = []
     for f in untracked_names:
@@ -892,56 +1096,432 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
             continue
         if f not in safe_paths:
             continue
-        classification = _classify_path(target_root, f)
-        if classification["status"] != "safe":
-            continue
         safe_untracked.append(f)
-        diff_parts.append(
-            f"\ndiff --git a/{f} b/{f}\n"
-            f"new file mode 100644\n--- /dev/null\n+++ b/{f}\n"
-            f"@@ new file @@\n{classification['content']}\n"
-        )
 
-    full_diff = "\n".join(d for d in diff_parts if d.strip())
-    if len(full_diff) > LIMITS["max_diff_chars"]:
-        full_diff = (
-            full_diff[: LIMITS["max_diff_chars"]]
-            + f"\n\n[TRUNCATED at {LIMITS['max_diff_chars']} characters]"
-        )
+    committed = sorted(set(branch_names))
+    staged = sorted(set(staged_names))
+    unstaged = sorted(set(unstaged_names))
+    untracked = sorted(set(untracked_names))
+    changed_files = sorted(all_changed)
 
-    context, context_omitted = _read_mode_files(target_root, pcfg, mode, target)
-    used_ctx = sum(len(v) for v in context.values())
-    related_context, related_omitted = _read_related(
-        mode, pcfg, max(0, LIMITS["max_context_chars"] - used_ctx)
+    omitted_files.extend(deleted_omitted)
+
+    return {
+        "resolved": resolved,
+        "pcfg": pcfg,
+        "base_branch": base_branch,
+        "target_root": target_root,
+        "merge_base": merge_base,
+        "branch_names": branch_names,
+        "staged_names": staged_names,
+        "unstaged_names": unstaged_names,
+        "untracked_names": untracked_names,
+        "branch_deleted": branch_deleted,
+        "staged_deleted": staged_deleted,
+        "unstaged_deleted": unstaged_deleted,
+        "renamed_files": renamed_files,
+        "safe_renames": safe_renames,
+        "all_changed": all_changed,
+        "changed_files": changed_files,
+        "deleted_files": deleted_files,
+        "deleted_safe": deleted_filtered,
+        "safe_paths": safe_paths,
+        "redacted_paths": redacted_paths,
+        "omitted_files": omitted_files,
+        "safe_untracked": safe_untracked,
+        "diff_pathspec": diff_pathspec,
+        "committed": committed,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+    }
+
+
+def _build_review_diff(inv: dict[str, Any], *, truncate: bool) -> tuple[str, bool]:
+    target_root = inv["target_root"]
+    diff_pathspec = inv["diff_pathspec"]
+    merge_base = inv["merge_base"]
+    safe_untracked = inv["safe_untracked"]
+    max_diff = LIMITS["max_diff_chars"]
+    budget = max_diff if truncate else 10 ** 9
+    buf: list[str] = []
+    total = 0
+    truncated = False
+
+    def emit(text: str) -> None:
+        nonlocal total, truncated, budget
+        if not text:
+            return
+        if truncate and len(text) > budget:
+            text = text[:budget]
+            truncated = True
+        buf.append(text)
+        total += len(text)
+        budget -= len(text)
+
+    def emit_sep() -> None:
+        if total > 0 and budget > 0:
+            emit("\n")
+
+    if diff_pathspec:
+        for cmd_base in (
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", merge_base, "HEAD", "--"],
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--cached", "--"],
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--"],
+        ):
+            if truncate and budget <= 0:
+                truncated = True
+                break
+            stream = _stream_git_stdout(
+                cmd_base + diff_pathspec,
+                target_root,
+            )
+            wrote_content = False
+            try:
+                for text in codecs.iterdecode(
+                    stream,
+                    "utf-8",
+                    errors="replace",
+                ):
+                    if not wrote_content:
+                        emit_sep()
+                        wrote_content = True
+                    emit(text)
+                    if truncate and budget <= 0:
+                        truncated = True
+                        break
+            finally:
+                stream.close()
+
+    for f in safe_untracked:
+        if truncate and budget <= 0:
+            truncated = True
+            break
+        cls = _classify_path(target_root, f)
+        if cls["status"] != "safe":
+            continue
+        content = cls["content"]
+        prefix = f"\ndiff --git a/{f} b/{f}\nnew file mode 100644\n--- /dev/null\n+++ b/{f}\n@@ new file @@\n"
+        emit(prefix)
+        if truncate and len(content) > budget:
+            content = content[:budget]
+            truncated = True
+        emit(content)
+        emit("\n")
+
+    result = "".join(buf)
+    if truncate and truncated:
+        marker = f"\n\n[TRUNCATED at {max_diff} characters]"
+        if len(marker) > max_diff:
+            marker = "[TRUNCATED]"[:max_diff]
+        result = result[:max_diff - len(marker)] + marker
+    return result, truncated
+
+
+def _stream_hash_review_state(inv: dict[str, Any]) -> str:
+    target_root = inv["target_root"]
+    diff_pathspec = inv["diff_pathspec"]
+    merge_base = inv["merge_base"]
+    safe_untracked = inv["safe_untracked"]
+    chunk = 65536
+    h = hashlib.sha256()
+    if diff_pathspec:
+        for args in (
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", merge_base, "HEAD", "--"] + diff_pathspec,
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--cached", "--"] + diff_pathspec,
+            ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--"] + diff_pathspec,
+        ):
+            stream = _stream_git_stdout(args, target_root)
+            try:
+                for block in stream:
+                    h.update(block)
+            finally:
+                stream.close()
+    for f in safe_untracked:
+        fp = target_root / f
+        try:
+            h.update(os.fsencode(fp.name))
+            size = fp.stat().st_size
+            h.update(str(size).encode())
+            with open(fp, "rb") as fh:
+                while True:
+                    data = fh.read(chunk)
+                    if not data:
+                        break
+                    h.update(data)
+        except OSError:
+            continue
+    manifest_state = _build_manifest_dict(inv)
+    manifest_state["mode"] = inv.get("_mode", "")
+    h.update(
+        json.dumps(
+            manifest_state,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
     )
+    return h.hexdigest()[:16]
 
-    seen_omit: set[tuple[str, str, str]] = set()
-    for o in omitted_files:
-        seen_omit.add((o["target"], o["path"], o["reason"]))
-    for o in context_omitted:
-        key = (o["target"], o["path"], o["reason"])
-        if key not in seen_omit:
-            seen_omit.add(key)
-            omitted_files.append(o)
+
+def _build_review_snapshot_id(inv: dict[str, Any]) -> str:
+    return _stream_hash_review_state(inv)
+
+
+def _classify_git_blob(target_root: Path, object_spec: str) -> dict[str, Any]:
+    try:
+        _run_git(
+            ["git", "cat-file", "-e", object_spec],
+            target_root,
+            timeout=10,
+        )
+    except RuntimeError:
+        return {"status": "broken", "reason": object_spec}
+
+    try:
+        size_raw = _run_git(
+            ["git", "cat-file", "-s", object_spec],
+            target_root,
+            timeout=10,
+        ).strip()
+        size = int(size_raw)
+    except (RuntimeError, ValueError):
+        return {"status": "broken", "reason": object_spec}
+
+    if size > LIMITS["max_file_bytes"]:
+        return {"status": "oversized", "reason": object_spec}
+
+    try:
+        blob = _run_git_bytes(
+            ["git", "cat-file", "blob", object_spec],
+            target_root,
+            timeout=10,
+        )
+    except RuntimeError:
+        return {"status": "broken", "reason": object_spec}
+
+    if b"\x00" in blob[:8192]:
+        return {"status": "binary", "reason": object_spec}
+
+    return {
+        "status": "safe",
+        "content": blob.decode("utf-8", errors="replace"),
+    }
+
+
+def _classify_deleted_blob(
+    target_root: Path,
+    rel: str,
+    source: str,
+) -> dict[str, Any]:
+    return _classify_git_blob(target_root, f"{source}:{rel}")
+
+
+def _build_manifest_dict(inv: dict[str, Any]) -> dict[str, Any]:
+    r = inv["resolved"]
+    return {
+        "target": r["target"],
+        "project": r["project"],
+        "branch": r["branch"],
+        "head": r["head"],
+        "base_branch": inv["base_branch"],
+        "merge_base": inv["merge_base"],
+        "dirty": r["dirty"],
+        "committed": inv["committed"],
+        "staged": inv["staged"],
+        "unstaged": inv["unstaged"],
+        "untracked": inv["untracked"],
+        "deleted": inv["deleted_files"],
+        "renamed": [
+            {"from": x["from"], "to": x["to"]}
+            for x in inv["renamed_files"]
+        ],
+        "changed_files": inv["changed_files"],
+        "redacted_paths": inv["redacted_paths"],
+        "omitted_files": inv["omitted_files"],
+    }
+
+
+def _paginate_content(content: str, page_size: int, page_number: int) -> dict[str, Any]:
+    total_pages = max(1, -(-len(content) // page_size))
+    if page_number >= total_pages:
+        raise ValueError(
+            f"Page {page_number} out of range (total_pages={total_pages})"
+        )
+    start = page_number * page_size
+    end = min(start + page_size, len(content))
+    page_content = content[start:end]
+    has_more = end < len(content)
+    return {
+        "page_content": page_content,
+        "has_more": has_more,
+        "total_pages": total_pages,
+    }
+
+
+def _encode_cursor(target: str, mode: str, snapshot_id: str, page: int) -> str:
+    data = {
+        "target": target,
+        "mode": mode,
+        "snapshot_id": snapshot_id,
+        "page": page,
+    }
+    return base64.urlsafe_b64encode(
+        json.dumps(data, sort_keys=True).encode()
+    ).decode()
+
+
+def _decode_cursor(cursor: str, target: str, mode: str, snapshot_id: str) -> int:
+    try:
+        decoded = json.loads(
+            base64.urlsafe_b64decode(cursor.encode()).decode()
+        )
+    except (ValueError, OSError):
+        raise ValueError(f"Malformed cursor: {cursor!r}")
+    if not isinstance(decoded, dict):
+        raise ValueError(f"Malformed cursor: {cursor!r}")
+    if decoded.get("target") != target:
+        raise ValueError(
+            f"Cursor target {decoded.get('target')!r} "
+            f"does not match {target!r}"
+        )
+    if decoded.get("mode") != mode:
+        raise ValueError(
+            f"Cursor mode {decoded.get('mode')!r} "
+            f"does not match {mode!r}"
+        )
+    if decoded.get("snapshot_id") != snapshot_id:
+        raise ValueError(
+            "Cursor snapshot is stale: worktree has changed"
+        )
+    page = decoded.get("page", 0)
+    if not isinstance(page, int) or page < 0:
+        raise ValueError(f"Invalid page in cursor: {page!r}")
+    return page
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_review_manifest(
+    target: str,
+    mode: str,
+    cursor: str = "",
+) -> dict[str, Any]:
+    inv = _git_inventory(target, mode)
+    inv["_mode"] = mode
+    inv["snapshot_id"] = _build_review_snapshot_id(inv)
+
+    if cursor:
+        page_number = _decode_cursor(
+            cursor, target, mode, inv["snapshot_id"]
+        )
+    else:
+        page_number = 0
+
+    manifest_dict = _build_manifest_dict(inv)
+    manifest_dict["snapshot_id"] = inv["snapshot_id"]
+    serialized = json.dumps(manifest_dict, ensure_ascii=True, sort_keys=True)
+    page_size = LIMITS["max_review_page_chars"]
+    paginated = _paginate_content(serialized, page_size, page_number)
+    next_cursor = (
+        _encode_cursor(target, mode, inv["snapshot_id"], page_number + 1)
+        if paginated["has_more"]
+        else None
+    )
 
     return {
         "target": target,
-        "project": resolved["project"],
-        "branch": resolved["branch"],
-        "head": resolved["head"],
-        "base_branch": base_branch,
-        "git_status": status_out.strip(),
-        "changed_files": sorted(all_changed),
-        "deleted_files": deleted_files,
-        "renamed_files": renamed_files,
-        "untracked_files": safe_untracked,
-        "diff": full_diff,
-        "file_contents": file_contents,
-        "redacted_paths": redacted_paths,
-        "omitted_files": omitted_files,
-        "context": context,
-        "related_context": related_context,
-        "related_omitted_files": related_omitted,
+        "project": inv["resolved"]["project"],
+        "snapshot_id": inv["snapshot_id"],
+        "cursor": cursor,
+        "next_cursor": next_cursor,
+        "has_more": paginated["has_more"],
+        "page_number": page_number,
+        "total_pages": paginated["total_pages"],
+        "content": paginated["page_content"],
+    }
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_review_bundle_page(
+    target: str,
+    mode: str,
+    cursor: str = "",
+) -> dict[str, Any]:
+    inv = _git_inventory(target, mode)
+    inv["_mode"] = mode
+    snapshot_id = _build_review_snapshot_id(inv)
+    r = inv["resolved"]
+
+    if cursor:
+        page_number = _decode_cursor(
+            cursor, target, mode, snapshot_id
+        )
+    else:
+        page_number = 0
+
+    full_diff, truncated = _build_review_diff(inv, truncate=True)
+    page_size = LIMITS["max_review_page_chars"]
+    paginated = _paginate_content(full_diff, page_size, page_number)
+    next_cursor = (
+        _encode_cursor(target, mode, snapshot_id, page_number + 1)
+        if paginated["has_more"]
+        else None
+    )
+
+    result: dict[str, Any] = {
+        "target": target,
+        "project": r["project"],
+        "branch": r["branch"],
+        "head": r["head"],
+        "base_branch": inv["base_branch"],
+        "merge_base": inv["merge_base"],
+        "snapshot_id": snapshot_id,
+        "cursor": cursor,
+        "next_cursor": next_cursor,
+        "has_more": paginated["has_more"],
+        "page_number": page_number,
+        "total_pages": paginated["total_pages"],
+        "content": paginated["page_content"],
+        "truncated": truncated,
+    }
+    return result
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
+    inv = _git_inventory(target, mode)
+    inv["_mode"] = mode
+    snapshot_id = _build_review_snapshot_id(inv)
+    r = inv["resolved"]
+    full_diff, truncated = _build_review_diff(inv, truncate=True)
+    page_size = LIMITS["max_review_page_chars"]
+    total_pages = max(1, -(-len(full_diff) // page_size))
+    first_page = full_diff[:page_size]
+    has_more = len(full_diff) > page_size
+    next_cursor = (
+        _encode_cursor(target, mode, snapshot_id, 1)
+        if has_more
+        else None
+    )
+
+    return {
+        "target": target,
+        "project": r["project"],
+        "branch": r["branch"],
+        "head": r["head"],
+        "base_branch": inv["base_branch"],
+        "merge_base": inv["merge_base"],
+        "dirty": r["dirty"],
+        "snapshot_id": snapshot_id,
+        "protocol": "paginated",
+        "cursor": "",
+        "next_cursor": next_cursor,
+        "has_more": has_more,
+        "page_number": 0,
+        "total_pages": total_pages,
+        "content": first_page,
+        "truncated": truncated,
+        "note": "Use get_review_manifest for full inventory; use get_review_bundle_page for remaining diff pages",
     }
 
 
