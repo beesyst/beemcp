@@ -373,6 +373,8 @@ def _parse_name_status_z(output: bytes) -> tuple[list[dict[str, str]], list[str]
 
 
 def _resolve_target(target: str) -> dict[str, Any]:
+    if Path(target).is_absolute():
+        raise ValueError("Target must not be an absolute path")
     project_cfg = PROJECTS.get(target)
     if project_cfg is not None:
         source = Path(project_cfg["source"]).expanduser().resolve()
@@ -380,6 +382,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
             "target": target,
             "project": target,
             "root": source,
+            "path": str(source),
             "branch": _run_git(["git", "branch", "--show-current"], source).strip(),
             "head": _run_git(["git", "rev-parse", "HEAD"], source).strip(),
             "is_main": True,
@@ -405,7 +408,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
                 i += 1
                 continue
             if line.startswith("worktree "):
-                wt_path = Path(line[len("worktree ") :])
+                wt_path = Path(line[len("worktree ") :]).expanduser().resolve()
                 wt_branch = ""
                 wt_head = ""
                 i += 1
@@ -442,6 +445,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
                             "target": target,
                             "project": pname,
                             "root": wt_path,
+                            "path": str(wt_path),
                             "branch": wt_branch,
                             "head": wt_head,
                             "is_main": False,
@@ -459,6 +463,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
                 "target": target,
                 "project": pname,
                 "root": source,
+                "path": str(source),
                 "branch": _run_git(["git", "branch", "--show-current"], source).strip(),
                 "head": _run_git(["git", "rev-parse", "HEAD"], source).strip(),
                 "is_main": True,
@@ -772,7 +777,7 @@ def list_worktrees(project: str) -> dict[str, Any]:
             i += 1
             continue
         if line.startswith("worktree "):
-            wt_path = Path(line[len("worktree ") :])
+            wt_path = Path(line[len("worktree ") :]).expanduser().resolve()
             wt_branch = ""
             wt_head = ""
             i += 1
@@ -808,6 +813,7 @@ def list_worktrees(project: str) -> dict[str, Any]:
                 {
                     "target": project if is_main else wt_path.name,
                     "project": project,
+                    "path": str(wt_path),
                     "branch": wt_branch,
                     "head": wt_head,
                     "is_main": is_main,
@@ -846,7 +852,11 @@ def get_project_context(target: str, mode: str) -> dict[str, Any]:
     result: dict[str, Any] = {
         "target": target,
         "project": resolved["project"],
+        "path": resolved["path"],
         "branch": resolved["branch"],
+        "head": resolved["head"],
+        "is_main": resolved["is_main"],
+        "dirty": resolved["dirty"],
         "mode": mode,
         "files": files_content,
         "related_files": related_content,
@@ -1137,6 +1147,111 @@ def _git_inventory(target: str, mode: str) -> dict[str, Any]:
     }
 
 
+def _stream_diff_segments(inv: dict[str, Any]) -> Generator[tuple[str, str], None, None]:
+    target_root = inv["target_root"]
+    diff_pathspec = inv["diff_pathspec"]
+    merge_base = inv["merge_base"]
+    safe_untracked = inv["safe_untracked"]
+
+    segment_specs: list[tuple[str, list[str]]] = []
+    if diff_pathspec:
+        segment_specs.append(
+            ("committed", ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", merge_base, "HEAD", "--"] + diff_pathspec)
+        )
+        segment_specs.append(
+            ("staged", ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--cached", "--"] + diff_pathspec)
+        )
+        segment_specs.append(
+            ("unstaged", ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--unified=8", "--"] + diff_pathspec)
+        )
+
+    for seg_name, cmd in segment_specs:
+        git_stream = _stream_git_stdout(cmd, target_root)
+        try:
+            for chunk in codecs.iterdecode(git_stream, "utf-8", errors="replace"):
+                if chunk:
+                    yield seg_name, chunk
+        finally:
+            git_stream.close()
+
+    for index, f in enumerate(sorted(safe_untracked)):
+        cls = _classify_path_meta(target_root, f)
+        if cls["status"] != "safe" or cls["size"] > LIMITS["max_file_bytes"]:
+            continue
+        prefix = f"diff --git a/{f} b/{f}\nnew file mode 100644\n--- /dev/null\n+++ b/{f}\n@@ new file @@\n"
+        seg_name = f"untracked:{index}"
+        yield seg_name, prefix
+        with open(cls["resolved"], "rb") as file_stream:
+            for chunk in codecs.iterdecode(
+                iter(lambda: file_stream.read(65536), b""),
+                "utf-8",
+                errors="replace",
+            ):
+                if chunk:
+                    yield seg_name, chunk
+        yield seg_name, "\n"
+
+
+def _build_review_diff_page(
+    inventory: dict[str, Any],
+    start_segment: str,
+    start_offset: int,
+    page_size: int,
+) -> tuple[str, str, int, bool]:
+    if page_size <= 0:
+        raise ValueError(f"page_size must be positive, got {page_size}")
+    if start_offset < 0:
+        raise ValueError(f"Invalid offset: {start_offset}")
+    if start_segment == "" and start_offset:
+        raise ValueError("Initial diff cursor must have offset 0")
+
+    parts: list[str] = []
+    total = 0
+    found_start = start_segment == ""
+    current_segment = ""
+    segment_offset = 0
+    stream = _stream_diff_segments(inventory)
+    try:
+        for segment, chunk in stream:
+            if segment != current_segment:
+                if current_segment and not found_start and current_segment == start_segment:
+                    if start_offset > segment_offset:
+                        raise ValueError(f"Offset outside segment: {start_offset}")
+                    found_start = True
+                current_segment = segment
+                segment_offset = 0
+
+            if not found_start:
+                if segment != start_segment:
+                    continue
+                if start_offset > segment_offset + len(chunk):
+                    segment_offset += len(chunk)
+                    continue
+                found_start = True
+
+            consumed = segment_offset
+            available = chunk
+            if segment == start_segment and start_offset > segment_offset:
+                available = chunk[start_offset - segment_offset:]
+                consumed = start_offset
+
+            if total == page_size:
+                return "".join(parts), segment, consumed, True
+            take = available[:page_size - total]
+            if take:
+                parts.append(take)
+                total += len(take)
+            if len(take) < len(available):
+                return "".join(parts), segment, consumed + len(take), True
+            segment_offset += len(chunk)
+
+        if not found_start:
+            raise ValueError(f"Unknown segment: {start_segment}")
+        return "".join(parts), "", 0, False
+    finally:
+        stream.close()
+
+
 def _build_review_diff(inv: dict[str, Any], *, truncate: bool) -> tuple[str, bool]:
     target_root = inv["target_root"]
     diff_pathspec = inv["diff_pathspec"]
@@ -1359,27 +1474,29 @@ def _paginate_content(content: str, page_size: int, page_number: int) -> dict[st
     }
 
 
-def _encode_cursor(target: str, mode: str, snapshot_id: str, page: int) -> str:
-    data = {
+def _encode_cursor(kind: str, target: str, mode: str, snapshot_id: str, page: int, **extra: Any) -> str:
+    data: dict[str, Any] = {
+        "kind": kind,
         "target": target,
         "mode": mode,
         "snapshot_id": snapshot_id,
         "page": page,
     }
+    data.update(extra)
     return base64.urlsafe_b64encode(
         json.dumps(data, sort_keys=True).encode()
     ).decode()
 
 
-def _decode_cursor(cursor: str, target: str, mode: str, snapshot_id: str) -> int:
-    try:
-        decoded = json.loads(
-            base64.urlsafe_b64decode(cursor.encode()).decode()
-        )
-    except (ValueError, OSError):
-        raise ValueError(f"Malformed cursor: {cursor!r}")
+def _validate_cursor_base(
+    decoded: dict[str, Any], kind: str, target: str, mode: str, snapshot_id: str
+) -> None:
     if not isinstance(decoded, dict):
-        raise ValueError(f"Malformed cursor: {cursor!r}")
+        raise ValueError(f"Malformed cursor")
+    if decoded.get("kind") != kind:
+        raise ValueError(
+            f"Cursor kind {decoded.get('kind')!r} does not match expected {kind!r}"
+        )
     if decoded.get("target") != target:
         raise ValueError(
             f"Cursor target {decoded.get('target')!r} "
@@ -1394,10 +1511,44 @@ def _decode_cursor(cursor: str, target: str, mode: str, snapshot_id: str) -> int
         raise ValueError(
             "Cursor snapshot is stale: worktree has changed"
         )
+
+
+def _decode_manifest_cursor(cursor: str, target: str, mode: str, snapshot_id: str) -> int:
+    try:
+        decoded = json.loads(
+            base64.urlsafe_b64decode(cursor.encode()).decode()
+        )
+    except (ValueError, OSError):
+        raise ValueError(f"Malformed cursor: {cursor!r}")
+    _validate_cursor_base(decoded, "manifest", target, mode, snapshot_id)
     page = decoded.get("page", 0)
     if not isinstance(page, int) or page < 0:
         raise ValueError(f"Invalid page in cursor: {page!r}")
     return page
+
+
+def _decode_diff_cursor(
+    cursor: str, target: str, mode: str, snapshot_id: str
+) -> dict[str, Any]:
+    try:
+        decoded = json.loads(
+            base64.urlsafe_b64decode(cursor.encode()).decode()
+        )
+    except (ValueError, OSError):
+        raise ValueError(f"Malformed cursor: {cursor!r}")
+    _validate_cursor_base(decoded, "diff", target, mode, snapshot_id)
+    segment = decoded.get("segment", "")
+    offset = decoded.get("offset", 0)
+    page = decoded.get("page", 0)
+    if not isinstance(segment, str):
+        raise ValueError(f"Invalid segment in cursor: {segment!r}")
+    if not segment:
+        raise ValueError("Diff continuation cursor must include a segment")
+    if not isinstance(offset, int) or offset < 0:
+        raise ValueError(f"Invalid offset in cursor: {offset!r}")
+    if not isinstance(page, int) or page < 0:
+        raise ValueError(f"Invalid page in cursor: {page!r}")
+    return {"segment": segment, "offset": offset, "page": page}
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
@@ -1411,7 +1562,7 @@ def get_review_manifest(
     inv["snapshot_id"] = _build_review_snapshot_id(inv)
 
     if cursor:
-        page_number = _decode_cursor(
+        page_number = _decode_manifest_cursor(
             cursor, target, mode, inv["snapshot_id"]
         )
     else:
@@ -1423,7 +1574,7 @@ def get_review_manifest(
     page_size = LIMITS["max_review_page_chars"]
     paginated = _paginate_content(serialized, page_size, page_number)
     next_cursor = (
-        _encode_cursor(target, mode, inv["snapshot_id"], page_number + 1)
+        _encode_cursor("manifest", target, mode, inv["snapshot_id"], page_number + 1)
         if paginated["has_more"]
         else None
     )
@@ -1453,18 +1604,28 @@ def get_review_bundle_page(
     r = inv["resolved"]
 
     if cursor:
-        page_number = _decode_cursor(
-            cursor, target, mode, snapshot_id
-        )
+        cur = _decode_diff_cursor(cursor, target, mode, snapshot_id)
+        page_number = cur.get("page", 0)
+        cur_segment = cur.get("segment", "")
+        cur_offset = cur.get("offset", 0)
     else:
         page_number = 0
+        cur_segment = ""
+        cur_offset = 0
 
-    full_diff, truncated = _build_review_diff(inv, truncate=True)
-    page_size = LIMITS["max_review_page_chars"]
-    paginated = _paginate_content(full_diff, page_size, page_number)
+    content, next_segment, next_offset, has_more = _build_review_diff_page(
+        inv,
+        cur_segment,
+        cur_offset,
+        LIMITS["max_review_page_chars"],
+    )
+
     next_cursor = (
-        _encode_cursor(target, mode, snapshot_id, page_number + 1)
-        if paginated["has_more"]
+        _encode_cursor(
+            "diff", target, mode, snapshot_id, page_number + 1,
+            segment=next_segment, offset=next_offset,
+        )
+        if has_more
         else None
     )
 
@@ -1478,11 +1639,10 @@ def get_review_bundle_page(
         "snapshot_id": snapshot_id,
         "cursor": cursor,
         "next_cursor": next_cursor,
-        "has_more": paginated["has_more"],
+        "has_more": has_more,
         "page_number": page_number,
-        "total_pages": paginated["total_pages"],
-        "content": paginated["page_content"],
-        "truncated": truncated,
+        "content": content,
+        "truncated": False,
     }
     return result
 
@@ -1494,16 +1654,6 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
     snapshot_id = _build_review_snapshot_id(inv)
     r = inv["resolved"]
     full_diff, truncated = _build_review_diff(inv, truncate=True)
-    page_size = LIMITS["max_review_page_chars"]
-    total_pages = max(1, -(-len(full_diff) // page_size))
-    first_page = full_diff[:page_size]
-    has_more = len(full_diff) > page_size
-    next_cursor = (
-        _encode_cursor(target, mode, snapshot_id, 1)
-        if has_more
-        else None
-    )
-
     return {
         "target": target,
         "project": r["project"],
@@ -1513,15 +1663,15 @@ def get_review_bundle(target: str, mode: str) -> dict[str, Any]:
         "merge_base": inv["merge_base"],
         "dirty": r["dirty"],
         "snapshot_id": snapshot_id,
-        "protocol": "paginated",
+        "protocol": "bounded",
         "cursor": "",
-        "next_cursor": next_cursor,
-        "has_more": has_more,
+        "next_cursor": None,
+        "has_more": truncated,
         "page_number": 0,
-        "total_pages": total_pages,
-        "content": first_page,
+        "total_pages": None,
+        "content": full_diff,
         "truncated": truncated,
-        "note": "Use get_review_manifest for full inventory; use get_review_bundle_page for remaining diff pages",
+        "note": "For full inventory, start get_review_manifest(cursor=\"\"). For the full safe diff, start get_review_bundle_page(cursor=\"\"). This bounded compatibility response does not continue through its cursor.",
     }
 
 

@@ -26,6 +26,9 @@ automatically (e.g. beeagent loads beeagent-rop ROADMAP).
 
 Git worktrees are automatically detected. A worktree at
 `/home/bee/Pro/_worktrees/beeagent-pr123` becomes target `beeagent-pr123`.
+Each entry has the same metadata contract for main and linked worktrees:
+`target`, `project`, exact absolute normalized `path`, `branch`, `head`,
+`is_main`, and `dirty`.
 
 Create a worktree manually:
 
@@ -60,8 +63,10 @@ Use the paginated protocol for all reviews:
 ### Cursor / snapshot behavior
 
 - Cursor is opaque to the client (base64-encoded JSON)
-- Contains `target`, `mode`, `snapshot_id`, `page`
+- Contains `kind` (either `"manifest"` or `"diff"`), `target`, `mode`, `snapshot_id`, `page`
+- Diff cursors also contain `segment` and `offset` for page-accurate streaming
 - Malformed cursor → ValueError
+- Cursor kind mismatch → ValueError
 - Cursor from another target → ValueError
 - Cursor from another mode → ValueError
 - Cursor from a stale snapshot (HEAD/status/inventory changed) → ValueError
@@ -69,8 +74,35 @@ Use the paginated protocol for all reviews:
 - `snapshot_id` is a deterministic hash of target, mode, branch, HEAD, full inventory, and SHA-256 of the actual safe diff
 - Changing content of a dirty/staged file invalidates the cursor
 - Each page ≤ `limits.max_review_page_chars` (default 30000)
-- Total safe diff bounded by `limits.max_diff_chars`; if exceeded, `truncated=true`
-- Truncation marker is included in the budget
+
+### Diff pagination (get_review_bundle_page)
+
+`get_review_bundle_page` uses segment-based streaming instead of pre-building
+the entire diff:
+
+1. The diff is split into **committed**, **staged**, **unstaged**, and one
+   deterministic segment per safe untracked file
+2. Each page reads up to `max_review_page_chars` characters, starting from the
+   cursor's `segment`/`offset` position
+3. No aggregate `max_diff_chars` truncation — the entire diff is available page
+   by page
+4. The last page reports `has_more=false`, `next_cursor=null`, `truncated=false`
+5. The backward-compatible `get_review_bundle` still applies `max_diff_chars`
+   and reports `truncated`
+
+### get_project_context metadata
+
+`get_project_context` now returns additional fields:
+- `path` — absolute path to the target root
+- `branch` — current branch name
+- `head` — current HEAD commit hash
+- `is_main` — whether the target is the main project source
+- `dirty` — whether the worktree has uncommitted changes
+
+### list_worktrees path
+
+Each `list_worktrees` entry includes an exact absolute normalized `path`.
+Main and linked worktrees have the same response contract.
 
 ### Manifest pagination
 
@@ -85,12 +117,15 @@ Manifest pagination uses the same `max_review_page_chars` boundary.
 ### Backward compatibility
 
 `get_review_bundle` still exists but returns:
-- The same manifest as `get_review_manifest` (direct dict, not paginated)
-- Only the first page of diff (as `content`)
-- `protocol: "paginated"`, `cursor`, `next_cursor`, `has_more`
-- No aggregate `file_contents`
-- No `context`, `related_context`, `related_omitted_files`, `git_status`
-- Instructions direct client to `get_review_bundle_page` for continuation
+- A bounded diff limited by `max_diff_chars`
+- `protocol: "bounded"`, `next_cursor: null`, and no continuation cursor
+- No manifest or manifest fields
+- A note directing full inventory to `get_review_manifest(cursor="")` and full
+  diff to `get_review_bundle_page(cursor="")`
+
+`max_diff_chars` does not limit the combined paginated diff. Every
+`get_review_bundle_page` response is bounded by `max_review_page_chars`; the
+final page always has `truncated=false`.
 
 ## Example ChatGPT requests
 
@@ -140,8 +175,23 @@ Manifest pagination uses the same `max_review_page_chars` boundary.
 ./start.sh status     # show service status + endpoint health
 ./start.sh logs       # follow the combined logs for both services
 ./start.sh stop       # stop tunnel → stop MCP
-./start.sh doctor     # read-only diagnostics
+./start.sh doctor     # read-only diagnostics (includes MCP tool contract check)
 ```
+
+## MCP tool contract check
+
+`start.sh` verifies the MCP tool contract automatically:
+
+- **doctor** (`./start.sh doctor`): after health/readiness checks, runs
+  `scripts/check_mcp_tools.py` to verify all expected tools are registered.
+- **start_stack** (used by `up`/`restart`): after readiness wait but before
+  starting the tunnel, runs the tool contract check. If it fails, MCP is
+  stopped and the stack does not come up, preventing a broken tunnel.
+
+The contract utility uses the real Streamable HTTP lifecycle: `initialize`,
+then `tools/list`. It runs against the local MCP URL before the tunnel starts.
+After changing a tool schema, restart both MCP and tunnel. If ChatGPT still
+shows an old schema, refresh or reconnect the Bee Dev MCP app/connector.
 
 ## Health endpoints
 

@@ -7,8 +7,10 @@ SYSTEMD_DIR="${HOME}/.config/systemd/user"
 TUNNEL_ENV="${CONFIG_DIR}/tunnel.env"
 MCP_SVC="bee-dev-mcp.service"
 TUNNEL_SVC="bee-dev-mcp-tunnel.service"
-HEALTHZ_URL="http://127.0.0.1:8000/healthz"
-READYZ_URL="http://127.0.0.1:8000/readyz"
+MCP_BASE_URL="http://127.0.0.1:8000"
+HEALTHZ_URL="${MCP_BASE_URL}/healthz"
+READYZ_URL="${MCP_BASE_URL}/readyz"
+MCP_URL="${MCP_BASE_URL}/mcp"
 
 die() { echo "$*" >&2; exit 1; }
 
@@ -33,6 +35,12 @@ wait_ready() {
     (( attempt == 30 )) || sleep 1
   done
   return 1
+}
+
+check_tools() {
+  "${SCRIPT_DIR}/.venv/bin/python" -B \
+    "${SCRIPT_DIR}/scripts/check_mcp_tools.py" \
+    --url "${MCP_URL}"
 }
 
 check_active() {
@@ -62,6 +70,11 @@ start_stack() {
   if ! wait_ready; then
     echo "MCP readiness check failed" >&2
     journalctl --user -u "${MCP_SVC}" --no-pager -n 40 >&2 || true
+    return 1
+  fi
+  if ! check_tools; then
+    echo "MCP tool contract check failed, stopping MCP" >&2
+    systemctl --user stop "${MCP_SVC}" || true
     return 1
   fi
   systemctl --user start "${TUNNEL_SVC}"
@@ -122,6 +135,9 @@ cmd_doctor() {
   systemctl --user is-active "${TUNNEL_SVC}" >/dev/null 2>&1 || problems+=("service inactive: ${TUNNEL_SVC}")
   curl --fail --silent --output /dev/null "${HEALTHZ_URL}" || problems+=("health endpoint unavailable")
   curl --fail --silent --output /dev/null "${READYZ_URL}" || problems+=("readiness endpoint unavailable")
+  if ! check_tools; then
+    problems+=("MCP tool contract check failed")
+  fi
 
   if ((${#problems[@]})); then
     echo "Doctor found ${#problems[@]} problem(s):" >&2

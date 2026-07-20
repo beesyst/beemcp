@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import importlib.util
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 TMP_ROOT: Path | None = None
+ROOT = Path(__file__).resolve().parents[1]
 
 for value in (os.environ.get("TMPDIR"), "/dev/shm", "/tmp"):
     if value is None:
@@ -158,6 +164,20 @@ class ReadOnlyToolsTests(unittest.TestCase):
         targets = [w["target"] for w in result["worktrees"]]
         self.assertIn("wt_main", targets)
         self.assertIn(wt_path.name, targets)
+        main = next(item for item in result["worktrees"] if item["is_main"])
+        linked = next(item for item in result["worktrees"] if not item["is_main"])
+        self.assertEqual(Path(main["path"]), main_repo.resolve())
+        self.assertTrue(Path(main["path"]).is_absolute())
+        self.assertEqual(main["target"], "wt_main")
+        self.assertEqual(Path(linked["path"]), wt_path.resolve())
+        self.assertTrue(Path(linked["path"]).is_absolute())
+        self.assertEqual(linked["target"], wt_path.name)
+        for item in (main, linked):
+            resolved = mod._resolve_target(item["target"])
+            context = mod.get_project_context(item["target"], "A")
+            for key in ("path", "branch", "head", "is_main", "dirty"):
+                self.assertEqual(context[key], resolved[key])
+                self.assertEqual(item[key], resolved[key])
 
     def test_target_linked_worktree_equals_basename(self) -> None:
         main_repo = self._init_repo("wt_base")
@@ -814,7 +834,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         config = (
             "limits:\n"
             "  max_file_bytes: 500000\n"
-            "  max_diff_chars: 500000\n"
+            "  max_diff_chars: 1000\n"
             "  max_context_chars: 5000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
@@ -889,7 +909,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         config = (
             "limits:\n"
             "  max_file_bytes: 500000\n"
-            "  max_diff_chars: 500000\n"
+            "  max_diff_chars: 1000\n"
             "  max_context_chars: 5000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
@@ -1830,21 +1850,20 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertFalse(page["has_more"])
         self.assertIsNone(page["next_cursor"])
         self.assertEqual(page["page_number"], 0)
-        self.assertEqual(page["total_pages"], 1)
         self.assertIn("small.txt", page["content"])
 
     def test_large_diff_multiple_pages(self) -> None:
         repo = self._init_repo("pag_large")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "large-branch"], repo)
-        big_content = "\n".join(f"LINE {i} " + "x" * 150 for i in range(2000))
+        big_content = "\n".join(f"LINE {i} " + "x" * 150 for i in range(50))
         (repo / "big.txt").write_text(big_content, encoding="utf-8")
         _run_git(["git", "add", "big.txt"], repo)
         _run_git(["git", "commit", "-m", "add big file"], repo)
         config = (
             "limits:\n"
             "  max_file_bytes: 10000000\n"
-            "  max_diff_chars: 500000\n"
+            "  max_diff_chars: 1000\n"
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
@@ -1875,9 +1894,46 @@ class ReadOnlyToolsTests(unittest.TestCase):
             self.assertIsNotNone(cursor)
         self.assertGreater(pages, 1)
         full_diff = "".join(all_content)
+        self.assertGreater(len(full_diff), 1000)
         self.assertIn("big.txt", full_diff)
         self.assertIn("LINE 0", full_diff)
-        self.assertIn("LINE 1999", full_diff)
+        self.assertIn("LINE 49", full_diff)
+        self.assertNotIn("[TRUNCATED", full_diff)
+        self.assertFalse(page["has_more"])
+        self.assertIsNone(page["next_cursor"])
+        self.assertFalse(page["truncated"])
+
+    def test_diff_page_stops_stream_after_page_is_full(self) -> None:
+        repo = self._init_repo("stream_page")
+        self._commit_file(repo, "base.txt", "base")
+        mod = self._import_server(self._make_project_yml(
+            "  stream_page:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
+        ))
+        state = {"yielded": 0, "closed": False}
+
+        def fake_stream(_inventory: dict[str, object]):
+            try:
+                for _ in range(100):
+                    state["yielded"] += 1
+                    yield "committed", "abc"
+            finally:
+                state["closed"] = True
+
+        with patch.object(mod, "_stream_diff_segments", side_effect=fake_stream):
+            content, segment, offset, has_more = mod._build_review_diff_page(
+                {}, "", 0, 5
+            )
+        self.assertEqual(content, "abcab")
+        self.assertEqual(segment, "committed")
+        self.assertEqual(offset, 5)
+        self.assertTrue(has_more)
+        self.assertLess(state["yielded"], 100)
+        self.assertTrue(state["closed"])
 
     def test_cursor_validation_malformed(self) -> None:
         repo = self._init_repo("pag_cv")
@@ -2096,7 +2152,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
-            "  max_review_page_chars: 500\n"
+            "  max_review_page_chars: 1500\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  trunc_diff:\n"
@@ -2107,19 +2163,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        all_pages: list[str] = []
-        cursor = ""
-        while True:
-            page = mod.get_review_bundle_page(
-                target="trunc_diff", mode="A", cursor=cursor
-            )
-            all_pages.append(page["content"])
-            if not page["has_more"]:
-                self.assertFalse(page["has_more"])
-                break
-            cursor = page["next_cursor"]
-        full = "".join(all_pages)
-        self.assertIn("[TRUNCATED at 1000 characters]", full)
+        result = mod.get_review_bundle(target="trunc_diff", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertIn("[TRUNCATED at 1000 characters]", result["content"])
 
     def test_get_review_bundle_returns_bounded_first_page_and_metadata(self) -> None:
         repo = self._init_repo("bundle_bounded")
@@ -2132,7 +2178,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         config = (
             "limits:\n"
             "  max_file_bytes: 10000000\n"
-            "  max_diff_chars: 500000\n"
+            "  max_diff_chars: 1000\n"
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
@@ -2148,7 +2194,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="bundle_bounded", mode="A")
-        self.assertEqual(result["protocol"], "paginated")
+        self.assertEqual(result["protocol"], "bounded")
         self.assertIn("content", result)
         self.assertIn("cursor", result)
         self.assertIn("next_cursor", result)
@@ -2160,6 +2206,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("changed_files", result)
         self.assertEqual(result["page_number"], 0)
         self.assertTrue(result["has_more"])
+        self.assertTrue(result["truncated"])
+        self.assertIsNone(result["next_cursor"])
+        self.assertLessEqual(len(result["content"]), 1000)
 
     def test_tool_list_contains_new_review_tools(self) -> None:
         repo = self._init_repo("tl_check")
@@ -2405,7 +2454,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             "  max_context_chars: 160000\n"
             "  max_tree_entries: 4000\n"
             "  max_search_results: 200\n"
-            "  max_review_page_chars: 500\n"
+            "  max_review_page_chars: 1500\n"
             "deny_paths: []\n"
             "projects:\n"
             f"  trunc_budget:\n"
@@ -2416,18 +2465,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        full = ""
-        cursor = ""
-        while True:
-            page = mod.get_review_bundle_page(
-                target="trunc_budget", mode="A", cursor=cursor
-            )
-            full += page["content"]
-            if not page["has_more"]:
-                break
-            cursor = page["next_cursor"]
-        self.assertLessEqual(len(full), 1000)
-        self.assertIn("[TRUNCATED at 1000 characters]", full)
+        result = mod.get_review_bundle(target="trunc_budget", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 1000)
+        self.assertIn("[TRUNCATED at 1000 characters]", result["content"])
 
     def test_staged_delete_uses_head_blob_for_safety(self) -> None:
         repo = self._init_repo("sdel_head_blob")
@@ -2507,18 +2548,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        full = ""
-        cursor = ""
-        while True:
-            page = mod.get_review_bundle_page(
-                target="small_mdc", mode="A", cursor=cursor
-            )
-            full += page["content"]
-            self.assertTrue(page["truncated"])
-            if not page["has_more"]:
-                break
-            cursor = page["next_cursor"]
-        self.assertLessEqual(len(full), 10)
+        result = mod.get_review_bundle(target="small_mdc", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 10)
 
     def test_manifest_multiple_pages_reassemble(self) -> None:
         repo = self._init_repo("man_multi")
@@ -2592,19 +2624,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        full = ""
-        cursor = ""
-        while True:
-            page = mod.get_review_bundle_page(
-                target="lg_comm", mode="A", cursor=cursor
-            )
-            full += page["content"]
-            self.assertTrue(page["truncated"])
-            if not page["has_more"]:
-                break
-            cursor = page["next_cursor"]
-        self.assertLessEqual(len(full), 500)
-        self.assertIn("[TRUNCATED", full)
+        result = mod.get_review_bundle(target="lg_comm", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 500)
+        self.assertIn("[TRUNCATED", result["content"])
 
     def test_large_untracked_file_bounded(self) -> None:
         repo = self._init_repo("lg_untr")
@@ -2629,10 +2652,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        page = mod.get_review_bundle_page(target="lg_untr", mode="A", cursor="")
-        self.assertTrue(page["truncated"])
-        self.assertLessEqual(len(page["content"]), 200)
-        self.assertIn("huge.txt", page["content"])
+        result = mod.get_review_bundle(target="lg_untr", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 200)
+        self.assertIn("huge.txt", result["content"])
 
     def test_git_failure_not_silent(self) -> None:
         repo = self._init_repo("git_fail")
@@ -2676,9 +2699,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"        files: []\n"
         )
         mod = self._import_server(config)
-        page = mod.get_review_bundle_page(target="bdgt_stop", mode="A", cursor="")
-        self.assertTrue(page["truncated"])
-        self.assertLessEqual(len(page["content"]), 5)
+        result = mod.get_review_bundle(target="bdgt_stop", mode="A")
+        self.assertTrue(result["truncated"])
+        self.assertLessEqual(len(result["content"]), 5)
 
     def test_stream_git_failure_propagates(self) -> None:
         import unittest.mock
@@ -2973,6 +2996,85 @@ class ReadOnlyToolsTests(unittest.TestCase):
             mod.get_review_manifest(
                 target="manifest_cursor_omitted", mode="A", cursor=cursor
             )
+
+
+class StreamableHttpIntegrationTests(unittest.TestCase):
+    def test_live_tools_list_uses_streamable_http_lifecycle(self) -> None:
+        import socket
+
+        import uvicorn
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        if TMP_ROOT is None:
+            self.skipTest("no writable temporary storage")
+        server: uvicorn.Server | None = None
+        thread: threading.Thread | None = None
+        with tempfile.TemporaryDirectory(dir=TMP_ROOT) as temp:
+            config = Path(temp) / "projects.yml"
+            config.write_text(
+                "limits:\n"
+                "  max_file_bytes: 200000\n"
+                "  max_diff_chars: 120000\n"
+                "  max_context_chars: 160000\n"
+                "  max_tree_entries: 4000\n"
+                "  max_search_results: 200\n"
+                "  max_review_page_chars: 30000\n"
+                "deny_paths: []\n"
+                "projects:\n"
+                f"  test-proj:\n    source: {ROOT}\n    base_branch: main\n"
+                "    context_modes:\n      A:\n        files: []\n",
+                encoding="utf-8",
+            )
+            old_config = os.environ.get("BEE_MCP_CONFIG")
+            os.environ["BEE_MCP_CONFIG"] = str(config)
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "transport_server", ROOT / "server.py"
+                )
+                if spec is None or spec.loader is None:
+                    raise AssertionError("Cannot load server.py")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                server = uvicorn.Server(uvicorn.Config(
+                    module.mcp.streamable_http_app(), host="127.0.0.1", port=port,
+                    log_level="error",
+                ))
+                thread = threading.Thread(target=server.run, daemon=True)
+                thread.start()
+                deadline = time.monotonic() + 5
+                while not server.started and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(server.started)
+
+                async def list_names() -> set[str]:
+                    async with streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp"
+                    ) as streams:
+                        read_stream, write_stream, _ = streams
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.list_tools()
+                    return {tool.name for tool in result.tools}
+
+                names = asyncio.run(list_names())
+                self.assertTrue(set((
+                    "list_projects", "list_worktrees", "get_project_context",
+                    "get_review_manifest", "get_review_bundle_page",
+                    "get_review_bundle", "read_project_file", "search_project",
+                )).issubset(names))
+            finally:
+                if server is not None:
+                    server.should_exit = True
+                if thread is not None:
+                    thread.join(timeout=5)
+                if old_config is None:
+                    os.environ.pop("BEE_MCP_CONFIG", None)
+                else:
+                    os.environ["BEE_MCP_CONFIG"] = old_config
 
 
 if __name__ == "__main__":

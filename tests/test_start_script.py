@@ -3,11 +3,14 @@ from __future__ import annotations
 import os
 import asyncio
 import importlib.util
+import io
 import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import AsyncMock, patch
 from pathlib import Path
 
 
@@ -56,7 +59,11 @@ class StartScriptTests(unittest.TestCase):
         for name in ("bee-dev-mcp.service", "bee-dev-mcp-tunnel.service"):
             shutil.copy2(ROOT / "ops/systemd" / name, self.repo / "ops/systemd" / name)
         self.python = self.repo / ".venv/bin/python"
-        self.python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.python.write_text(
+            '#!/bin/sh\necho "python $*" >> "$CALL_LOG"\n'
+            '[ "${FAIL_TOOLS:-0}" = 0 ]\n',
+            encoding="utf-8",
+        )
         self.python.chmod(0o755)
         (self.home / ".config/bee-dev-mcp/tunnel.env").write_text(
             "TUNNEL_SECRET=also-never-print-this\n", encoding="utf-8"
@@ -178,6 +185,32 @@ esac
         self.assertLess(ready, tunnel)
         self.assertIn("systemctl --user is-active bee-dev-mcp.service", calls)
         self.assertIn("systemctl --user is-active bee-dev-mcp-tunnel.service", calls)
+
+    def test_check_tools_uses_derived_url_and_precedes_tunnel(self) -> None:
+        self.install_units()
+        result = self.run_script("up")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls()
+        check = next(i for i, call in enumerate(calls) if call.startswith("python "))
+        tunnel = calls.index("systemctl --user start bee-dev-mcp-tunnel.service")
+        self.assertIn("-B", calls[check])
+        self.assertIn("--url http://127.0.0.1:8000/mcp", calls[check])
+        self.assertLess(check, tunnel)
+
+    def test_failed_tools_check_stops_mcp_without_starting_tunnel(self) -> None:
+        self.install_units()
+        result = self.run_script("up", FAIL_TOOLS="1")
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls()
+        self.assertIn("systemctl --user stop bee-dev-mcp.service", calls)
+        self.assertNotIn("systemctl --user start bee-dev-mcp-tunnel.service", calls)
+
+    def test_doctor_keeps_tools_check_output_and_fails(self) -> None:
+        self.install_units()
+        result = self.run_script("doctor", FAIL_TOOLS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MCP tool contract check failed", result.stderr)
+        self.assertTrue(any(call.startswith("python ") for call in self.calls()))
 
     def test_status_propagates_service_failure(self) -> None:
         result = self.run_script("status", FAIL_MCP_STATUS="1")
@@ -306,6 +339,54 @@ class StaticAcceptanceTests(unittest.TestCase):
                     os.environ.pop("BEE_MCP_CONFIG", None)
                 else:
                     os.environ["BEE_MCP_CONFIG"] = old_config
+
+
+class CheckMcpToolsTests(unittest.TestCase):
+    @staticmethod
+    def _module():
+        spec = importlib.util.spec_from_file_location(
+            "check_mcp_tools", ROOT / "scripts/check_mcp_tools.py"
+        )
+        if spec is None or spec.loader is None:
+            raise AssertionError("Cannot load check_mcp_tools.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_complete_contract(self) -> None:
+        module = self._module()
+        output = io.StringIO()
+        with patch.object(module, "_list_tools", AsyncMock(
+            return_value=set(module.EXPECTED_TOOLS)
+        )), patch("sys.argv", ["check_mcp_tools.py", "--url", "http://test/mcp"]), \
+                redirect_stdout(output), redirect_stderr(io.StringIO()):
+            self.assertEqual(module.main(), 0)
+        self.assertNotIn("missing MCP tool", output.getvalue())
+
+    def test_missing_tools_are_individual_and_deterministic(self) -> None:
+        module = self._module()
+        error = io.StringIO()
+        found = set(module.EXPECTED_TOOLS) - {
+            "get_review_manifest", "get_review_bundle_page"
+        }
+        with patch.object(module, "_list_tools", AsyncMock(return_value=found)), \
+                patch("sys.argv", ["check_mcp_tools.py", "--url", "http://test/mcp"]), \
+                redirect_stdout(io.StringIO()), redirect_stderr(error):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(error.getvalue().splitlines(), [
+            "missing MCP tool: get_review_manifest",
+            "missing MCP tool: get_review_bundle_page",
+        ])
+
+    def test_transport_failure_is_brief(self) -> None:
+        module = self._module()
+        error = io.StringIO()
+        with patch.object(module, "_list_tools", AsyncMock(
+            side_effect=RuntimeError("token=secret")
+        )), patch("sys.argv", ["check_mcp_tools.py", "--url", "http://test/mcp"]), \
+                redirect_stdout(io.StringIO()), redirect_stderr(error):
+            self.assertEqual(module.main(), 1)
+        self.assertEqual(error.getvalue(), "MCP transport or protocol check failed\n")
 
 
 if __name__ == "__main__":
