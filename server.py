@@ -201,7 +201,7 @@ mcp = FastMCP(
         "- search_project: fixed-string search within configured boundaries"
     ),
     host="127.0.0.1",
-    port=8000,
+    port=8765,
 )
 
 

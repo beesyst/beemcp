@@ -204,7 +204,7 @@ esac
         check = next(i for i, call in enumerate(calls) if call.startswith("python "))
         tunnel = calls.index("systemctl --user start bee-dev-mcp-tunnel.service")
         self.assertIn("-B", calls[check])
-        self.assertIn("--url http://127.0.0.1:8000/mcp", calls[check])
+        self.assertIn("--url http://127.0.0.1:8765/mcp", calls[check])
         self.assertLess(check, tunnel)
 
     def test_failed_tools_check_stops_mcp_without_starting_tunnel(self) -> None:
