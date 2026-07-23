@@ -22,6 +22,19 @@ Configured in `projects.yml`. Each project has A/B/C context modes:
 Projects can also declare `related` projects whose files are loaded
 automatically (e.g. beeagent loads beeagent-rop ROADMAP).
 
+### Directory expansion in `files`
+
+`context_modes.<mode>.files` accepts relative paths to both files and
+directories. Directory entries are expanded recursively:
+
+- All nested text files (respecting deny patterns) are included.
+- Deduplicated — a file listed explicitly and also found under a directory
+  entry appears only once.
+- Expansion stops when `limits.max_tree_entries` is reached; the incomplete
+  directory is reported in `omitted_files` with reason `tree_limit`.
+- `max_file_bytes` and `max_context_chars` still apply after expansion.
+- Directory symlinks are not traversed.
+
 ## Worktree discovery
 
 Git worktrees are automatically detected. A worktree at

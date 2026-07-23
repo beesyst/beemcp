@@ -627,6 +627,68 @@ def _mode_files(project_cfg: dict[str, Any], mode: str) -> list[str]:
     return collected
 
 
+def _expand_mode_file_entries(
+    target_root: Path,
+    entries: list[str],
+) -> tuple[list[str], list[str]]:
+    def is_denied_directory(path: str) -> bool:
+        normalized = path.rstrip("/")
+        return _is_denied(normalized) or _is_denied(f"{normalized}/")
+
+    file_entries: list[str] = []
+    dir_entries: list[tuple[str, Path]] = []
+
+    for entry in entries:
+        try:
+            resolved = (target_root / entry).resolve(strict=True)
+        except OSError:
+            file_entries.append(entry)
+            continue
+
+        if not resolved.is_relative_to(target_root) or not resolved.is_dir():
+            file_entries.append(entry)
+            continue
+
+        relative = str(resolved.relative_to(target_root))
+        if is_denied_directory(relative):
+            file_entries.append(entry)
+            continue
+
+        dir_entries.append((entry, resolved))
+
+    expanded = list(file_entries)
+    truncated_roots: list[str] = []
+    seen = set(file_entries)
+    max_entries = LIMITS["max_tree_entries"]
+    recursive_count = 0
+
+    for dir_entry, resolved_dir in dir_entries:
+        for dirpath, dirnames, filenames in os.walk(resolved_dir):
+            rel_dir = Path(dirpath).relative_to(target_root)
+            dirnames[:] = [
+                name
+                for name in sorted(dirnames)
+                if not is_denied_directory(str(rel_dir / name))
+            ]
+            filenames.sort()
+
+            for filename in filenames:
+                rel = str(rel_dir / filename)
+
+                if _is_denied(rel) or rel in seen:
+                    continue
+
+                if recursive_count >= max_entries:
+                    truncated_roots.append(dir_entry)
+                    return expanded, truncated_roots
+
+                seen.add(rel)
+                expanded.append(rel)
+                recursive_count += 1
+
+    return expanded, truncated_roots
+
+
 def _mode_tree_roots(project_cfg: dict[str, Any], mode: str) -> list[str]:
     modes = project_cfg.get("context_modes", {})
     if mode not in modes:
@@ -650,9 +712,12 @@ def _mode_tree_roots(project_cfg: dict[str, Any], mode: str) -> list[str]:
 def _read_mode_files(
     target_root: Path, project_cfg: dict[str, Any], mode: str, target: str = ""
 ) -> tuple[dict[str, str], list[dict[str, str]]]:
-    files_to_read = _mode_files(project_cfg, mode)
+    raw_entries = _mode_files(project_cfg, mode)
+    files_to_read, truncated_roots = _expand_mode_file_entries(target_root, raw_entries)
     contents: dict[str, str] = {}
     omitted: list[dict[str, str]] = []
+    for root_entry in truncated_roots:
+        omitted.append({"target": target, "path": root_entry, "reason": "tree_limit"})
     remaining = LIMITS["max_context_chars"]
     for rel in files_to_read:
         if remaining <= 0:

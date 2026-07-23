@@ -302,6 +302,86 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("src/util.py", tree)
         self.assertNotIn("docs/guide.md", tree)
 
+    def test_directory_entry_recursively_loads_direct_and_nested_text_file(
+        self,
+    ) -> None:
+        repo = self._init_repo("dir_expand")
+        self._commit_file(repo, "README.md", "# R")
+        self._commit_file(repo, "docs/guide.md", "# Guide")
+        self._commit_file(repo, "docs/api/v1/index.md", "# API v1")
+        self._commit_file(repo, "src/main.py", "print('hello')")
+
+        config = self._make_project_yml(
+            "  dir_expand:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
+            "      B:\n"
+            "        extends: A\n"
+            "        files:\n"
+            "          - docs/guide.md\n"
+            "          - docs/\n"
+            "          - src/main.py\n"
+        )
+
+        mod = self._import_server(config)
+        result = mod.get_project_context(
+            target="dir_expand",
+            mode="B",
+        )
+
+        files = result["files"]
+        keys = list(files)
+
+        self.assertEqual(files["docs/guide.md"], "# Guide")
+        self.assertEqual(files["docs/api/v1/index.md"], "# API v1")
+        self.assertEqual(files["src/main.py"], "print('hello')")
+        self.assertEqual(files["README.md"], "# R")
+        self.assertEqual(keys.count("docs/guide.md"), 1)
+        self.assertNotIn("docs/", files)
+
+        recursive_index = keys.index("docs/api/v1/index.md")
+        for explicit in ("docs/guide.md", "src/main.py", "README.md"):
+            self.assertLess(keys.index(explicit), recursive_index)
+
+    def test_directory_expansion_respects_max_tree_entries_and_reports_tree_limit(
+        self,
+    ) -> None:
+        repo = self._init_repo("dir_limit")
+        for name in ("a.md", "b.md", "c.md", "d.md"):
+            self._commit_file(repo, f"docs/{name}", name)
+
+        config = self._make_project_yml(
+            "  dir_limit:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - docs\n"
+        ).replace("  max_tree_entries: 4000\n", "  max_tree_entries: 3\n", 1)
+        mod = self._import_server(config)
+
+        result = mod.get_project_context(target="dir_limit", mode="A")
+
+        self.assertEqual(list(result["files"]), ["docs/a.md", "docs/b.md", "docs/c.md"])
+        self.assertIn(
+            {"target": "dir_limit", "path": "docs", "reason": "tree_limit"},
+            result["omitted_files"],
+        )
+
+        (repo / "docs/d.md").unlink()
+        result = mod.get_project_context(target="dir_limit", mode="A")
+
+        self.assertEqual(list(result["files"]), ["docs/a.md", "docs/b.md", "docs/c.md"])
+        self.assertNotIn(
+            {"target": "dir_limit", "path": "docs", "reason": "tree_limit"},
+            result["omitted_files"],
+        )
+
     def test_related_roadmap_returned(self) -> None:
         proj_a = self._init_repo("rel_a")
         self._commit_file(proj_a, "docs/ROADMAP.md", "# Roadmap A")

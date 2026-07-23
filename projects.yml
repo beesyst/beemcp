@@ -65,6 +65,8 @@ projects:
       B:
         extends: A
         files:
+          - docs/product/ui_roadmap.md
+          - docs/WEB_UI.md
           - pyproject.toml
           - config/start.py
           - config/settings.yml
@@ -122,6 +124,10 @@ projects:
           - docs/SDLC.md
           - docs/SECURITY.md
           - docs/SPEC.md
+          - docs/API_CONTRACT.md
+          - docs/COMPONENTS.md
+          - docs/INTEGRATION.md
+          - docs/WEB_UI.md
       B:
         extends: A
         files:
@@ -129,8 +135,8 @@ projects:
           - config/start.py
           - config/settings.yml
           - docs/ARCHITECTURE.md
-          - docs/API_CONTRACT.md
           - docs/DEV_GUIDE.md
+          - docs/vendor/tabler/
       C:
         extends: B
         tree_roots:
