@@ -1,0 +1,11 @@
+[Unit]
+Description=Bee Dev MCP tunnel
+After=bee-dev-mcp.service
+Requires=bee-dev-mcp.service
+
+[Service]
+Type=simple
+EnvironmentFile=@@ENV_FILE@@
+ExecStart="@@TUNNEL_CLIENT@@" run --profile "@@TUNNEL_PROFILE@@"
+Restart=on-failure
+RestartSec=3

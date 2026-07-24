@@ -1,0 +1,12 @@
+[Unit]
+Description=Bee Dev MCP server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@SCRIPT_DIR@@
+ExecStart="@@VENV_PYTHON@@" "@@SCRIPT_DIR@@/server.py"
+Environment="BEE_DEV_MCP_HOST=@@MCP_HOST@@"
+Environment="BEE_DEV_MCP_PORT=@@MCP_PORT@@"
+Restart=on-failure
+RestartSec=3

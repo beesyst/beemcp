@@ -2,6 +2,58 @@
 
 ChatGPT read-only architecture and code review gateway through MCP.
 
+## Quick start
+
+```bash
+git clone <repo-url> bee-dev-mcp
+cd bee-dev-mcp
+./start.sh
+```
+
+The first run creates `.env` from `.env.example`, sets mode `0600`, syncs
+dependencies, and validates the configuration. If required values are empty,
+it reports the full list. Fill only these values in repo-local `.env`:
+
+- `BEE_DEV_MCP_TUNNEL_ID`
+- `CONTROL_PLANE_API_KEY`
+
+Then run `./start.sh` again. It reconciles the runtime profile and units, applies
+`.env`, starts MCP, verifies its contract, and starts the tunnel. Manual
+`cp .env.example .env` and `chmod 600 .env` are not required. `./start.sh setup`
+remains available as an explicit setup command, but is not required for the
+normal first run.
+
+Use `./start.sh doctor` after the stack is up.
+
+### Configuration ownership
+
+| File | Purpose | Edited by user? |
+|---|---|---|
+| `<repo>/.env` | Runtime, tunnel, and secrets configuration | **Yes** |
+| `<repo>/.env.example` | Public template tracked in Git | No |
+| `<repo>/config/projects.yml` | Project allowlist and local source paths | **Yes** — edit `source` for a different directory layout |
+| `~/.config/systemd/user/bee-dev-mcp*.service` | Installed systemd units | **No** — auto-generated |
+| `~/.config/tunnel-client/*.yaml` | Tunnel profile | **No** — auto-generated |
+
+- `.env` is Git-ignored, permissions `0600`.
+- Project source paths are resolved relative to `config/projects.yml`; unavailable projects are checked when accessed.
+- Generated systemd units and tunnel profiles are never edited manually.
+- After changing `.env`, run `./start.sh`.
+
+## Migration from legacy config
+
+If you had a previous setup with `~/.config/bee-dev-mcp/tunnel.env` and
+`~/.config/tunnel-client/bee-dev-mcp-test.yaml`:
+
+1. Copy your tunnel ID from the old tunnel-client profile.
+2. Copy your `CONTROL_PLANE_API_KEY` from the old `tunnel.env`.
+3. Write both values into the repo-local `.env`.
+4. Run `./start.sh setup`, `./start.sh restart`, `./start.sh doctor`.
+5. After confirming the stack works, delete the old files manually:
+   `rm -rf ~/.config/bee-dev-mcp`
+
+Credentials are **not** copied automatically.
+
 ## Safety boundary
 
 - No file writes — all tools are read-only.
@@ -13,7 +65,7 @@ ChatGPT read-only architecture and code review gateway through MCP.
 
 ## Projects and context modes
 
-Configured in `projects.yml`. Each project has A/B/C context modes:
+Configured in `config/projects.yml`. Each project has A/B/C context modes:
 
 - **Mode A** — key architecture files (ROADMAP, SDLC, SECURITY, templates).
 - **Mode B** — extends A with source code entry points and configuration.
@@ -175,7 +227,7 @@ final page always has `truncated=false`.
 
 ## How to add a new project
 
-1. Add an entry to `projects.yml` under `projects:` with `source`,
+1. Add an entry to `config/projects.yml` under `projects:` with `source`,
    `base_branch`, and `context_modes`.
 2. Define A/B/C modes and optionally `related` projects.
 3. Verify with `./start.sh restart` and check `/healthz`.
@@ -258,8 +310,12 @@ cd /home/bee/Pro/bee-dev-mcp
 ./start.sh setup
 ```
 
-`setup` verifies required programs and tunnel environment, runs
-`uv sync --frozen`, installs the two user units, and reloads the user manager.
+`setup` verifies required programs and `.env`, runs `uv sync --frozen`,
+generates the tunnel-client profile (from `.env` values), renders systemd
+units from portable `ops/systemd/*.service.in` templates, installs them, and
+reloads the user manager.
 
-No secrets file is required — the MCP server no longer uses API tokens,
-DeepSeek keys, or Copilot credentials.
+The API key (`CONTROL_PLANE_API_KEY`) is never written into the tunnel profile
+(YAML uses `env:CONTROL_PLANE_API_KEY`), and never passed to the Python MCP
+server process (only host/port are set as Environment= directives in the MCP
+unit). The tunnel unit reads the full `.env` via `EnvironmentFile=`.

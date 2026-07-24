@@ -28,7 +28,7 @@ deny_paths:
 
 projects:
   bee-dev-mcp:
-    source: /home/bee/Pro/bee-dev-mcp
+    source: ..
     base_branch: main
     context_modes:
       A:
@@ -41,8 +41,11 @@ projects:
         extends: A
         files:
           - .gitignore
-          - ops/systemd/bee-dev-mcp.service
-          - ops/systemd/bee-dev-mcp-tunnel.service
+          - .env.example
+          - config/projects.yml
+          - config/start.py
+          - ops/systemd/bee-dev-mcp.service.in
+          - ops/systemd/bee-dev-mcp-tunnel.service.in
       C:
         extends: B
         tree_roots:
@@ -50,7 +53,7 @@ projects:
           - tests
 
   beeagent:
-    source: /home/bee/Pro/beeagent
+    source: ../../beeagent
     base_branch: main
     context_modes:
       A:
@@ -85,7 +88,7 @@ projects:
           - docs/ROADMAP.md
 
   beeagent-rop:
-    source: /home/bee/Pro/beeagent-rop
+    source: ../../beeagent-rop
     base_branch: main
     context_modes:
       A:
@@ -114,7 +117,7 @@ projects:
           - docs/ROADMAP.md
 
   beeui:
-    source: /home/bee/Pro/beeui
+    source: ../../beeui
     base_branch: main
     context_modes:
       A:

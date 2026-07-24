@@ -22,7 +22,27 @@ from mcp_contract import EXPECTED_TOOLS, TOOL_CONTRACT_VERSION, tool_contract_fi
 
 
 HERE = Path(__file__).resolve().parent
-CONFIG_PATH = Path(os.environ.get("BEE_MCP_CONFIG", HERE / "projects.yml")).expanduser()
+
+MCP_HOST = os.environ.get("BEE_DEV_MCP_HOST")
+MCP_PORT_STR = os.environ.get("BEE_DEV_MCP_PORT")
+
+if not MCP_HOST:
+    raise RuntimeError("BEE_DEV_MCP_HOST must be set and non-empty")
+if not MCP_PORT_STR:
+    raise RuntimeError("BEE_DEV_MCP_PORT must be set")
+try:
+    MCP_PORT = int(MCP_PORT_STR)
+except ValueError:
+    raise RuntimeError(f"BEE_DEV_MCP_PORT must be an integer, got: {MCP_PORT_STR!r}")
+if not (1 <= MCP_PORT <= 65535):
+    raise RuntimeError(f"BEE_DEV_MCP_PORT must be between 1 and 65535, got: {MCP_PORT}")
+
+CONFIG_PATH = Path(
+    os.environ.get("BEE_MCP_CONFIG", HERE / "config" / "projects.yml")
+).expanduser()
+if not CONFIG_PATH.is_absolute():
+    CONFIG_PATH = HERE / CONFIG_PATH
+CONFIG_PATH = CONFIG_PATH.resolve()
 READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -41,6 +61,25 @@ def _check_relative_path(value: Any, label: str) -> None:
         raise RuntimeError(f"{label} must be relative, got absolute: {value}")
     if ".." in p.parts:
         raise RuntimeError(f"{label} must not contain '..': {value}")
+
+
+def _project_source(
+    project: str,
+    config: dict[str, Any],
+) -> Path:
+    source_path = Path(config["source"]).expanduser()
+
+    if not source_path.is_absolute():
+        source_path = CONFIG_PATH.parent / source_path
+
+    source = source_path.resolve()
+
+    if not source.is_dir() or not (source / ".git").is_dir():
+        raise RuntimeError(
+            f"project {project!r}: source is not a Git repository: {source}"
+        )
+
+    return source
 
 
 def load_config() -> dict[str, Any]:
@@ -72,28 +111,12 @@ def load_config() -> dict[str, Any]:
             raise RuntimeError(f"project {name!r}: must be a mapping")
 
         source_raw = cfg.get("source")
-        if not isinstance(source_raw, str):
-            raise RuntimeError(f"project {name!r}: source must be a string")
-        source = Path(source_raw).expanduser().resolve()
-        if not source.is_dir() or not (source / ".git").is_dir():
-            raise RuntimeError(f"project {name!r}: source is not a Git repository: {source}")
+        if not isinstance(source_raw, str) or not source_raw:
+            raise RuntimeError(f"project {name!r}: source must be a non-empty string")
 
         base_branch = cfg.get("base_branch")
         if not isinstance(base_branch, str) or not base_branch:
             raise RuntimeError(f"project {name!r}: base_branch must be a non-empty string")
-        try:
-            subprocess.run(
-                ["git", "rev-parse", "--verify", "refs/heads/" + base_branch],
-                cwd=source,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=True,
-            )
-        except subprocess.CalledProcessError:
-            raise RuntimeError(
-                f"project {name!r}: base_branch {base_branch!r} does not exist in {source}"
-            )
-
         modes = cfg.get("context_modes")
         if not isinstance(modes, dict):
             raise RuntimeError(f"project {name!r}: context_modes must be a mapping")
@@ -165,6 +188,8 @@ PROJECTS: dict[str, Any] = CONFIG["projects"]
 
 mcp = FastMCP(
     name="Bee Dev Read-Only Review",
+    host=MCP_HOST,
+    port=MCP_PORT,
     instructions=(
         "This server provides read-only access to allowlisted Git repositories. "
         "All tools are read-only: no files are modified, no agents or checks are "
@@ -200,8 +225,6 @@ mcp = FastMCP(
         "checked through paginated diff)\n"
         "- search_project: fixed-string search within configured boundaries"
     ),
-    host="127.0.0.1",
-    port=8765,
 )
 
 
@@ -329,6 +352,8 @@ def _stream_git_stdout(
 
 
 def _is_denied(rel_path: str) -> bool:
+    if rel_path == ".env.example":
+        return False
     for pattern in DENY_PATTERNS:
         if fnmatch.fnmatch(rel_path, pattern):
             return True
@@ -378,7 +403,7 @@ def _resolve_target(target: str) -> dict[str, Any]:
         raise ValueError("Target must not be an absolute path")
     project_cfg = PROJECTS.get(target)
     if project_cfg is not None:
-        source = Path(project_cfg["source"]).expanduser().resolve()
+        source = _project_source(target, project_cfg)
         return {
             "target": target,
             "project": target,
@@ -392,7 +417,10 @@ def _resolve_target(target: str) -> dict[str, Any]:
 
     candidates: list[dict[str, Any]] = []
     for pname, pcfg in PROJECTS.items():
-        source = Path(pcfg["source"]).expanduser().resolve()
+        try:
+            source = _project_source(pname, pcfg)
+        except RuntimeError:
+            continue
         common_dir = _run_git(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
             source,
@@ -753,7 +781,7 @@ def _read_related(
     for ritem in related:
         rproj = ritem["project"]
         rpcfg = PROJECTS[rproj]
-        rsource = Path(rpcfg["source"]).expanduser().resolve()
+        rsource = _project_source(rproj, rpcfg)
         for rf in ritem["files"]:
             if remaining <= 0:
                 omitted.append({"target": rproj, "path": rf, "reason": "context_limit"})
@@ -827,7 +855,7 @@ def list_worktrees(project: str) -> dict[str, Any]:
     pcfg = PROJECTS.get(project)
     if pcfg is None:
         raise ValueError(f"Unknown project: {project!r}")
-    source = Path(pcfg["source"]).expanduser().resolve()
+    source = _project_source(project, pcfg)
     common_dir = _run_git(
         ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
         source,

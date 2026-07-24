@@ -105,8 +105,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config.yml"
         config_path.write_text(config_text, encoding="utf-8")
-        old = os.environ.get("BEE_MCP_CONFIG")
+        old_config = os.environ.get("BEE_MCP_CONFIG")
+        old_host = os.environ.get("BEE_DEV_MCP_HOST")
+        old_port = os.environ.get("BEE_DEV_MCP_PORT")
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+        os.environ["BEE_DEV_MCP_PORT"] = "8765"
         try:
             spec = importlib.util.spec_from_file_location("_test_server", server_py)
             if spec is None or spec.loader is None:
@@ -116,12 +120,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
             loader.exec_module(module)
             return module
         finally:
-            if old is None:
+            if old_config is None:
                 os.environ.pop("BEE_MCP_CONFIG", None)
             else:
-                os.environ["BEE_MCP_CONFIG"] = old
-
-    # --- Tests ---
+                os.environ["BEE_MCP_CONFIG"] = old_config
+            if old_host is None:
+                os.environ.pop("BEE_DEV_MCP_HOST", None)
+            else:
+                os.environ["BEE_DEV_MCP_HOST"] = old_host
+            if old_port is None:
+                os.environ.pop("BEE_DEV_MCP_PORT", None)
+            else:
+                os.environ["BEE_DEV_MCP_PORT"] = old_port
 
     def test_list_projects_returns_allowlisted_projects_and_modes(self) -> None:
         repo = self._init_repo("proj_a")
@@ -144,6 +154,32 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("context_modes", proj_a)
         self.assertIn("A", proj_a["context_modes"])
         self.assertNotIn("secrets", str(result))
+
+    def test_relative_source_allows_unavailable_sibling_until_accessed(self) -> None:
+        repo = self._init_repo("relative_source")
+        self._commit_file(repo, "README.md", "relative source")
+        config = self._make_project_yml(
+            '  existing:\n'
+            '    source: relative_source\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files:\n'
+            '          - README.md\n'
+            '  unavailable:\n'
+            '    source: missing-sibling\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+
+        mod = self._import_server(config)
+
+        context = mod.get_project_context(target="existing", mode="A")
+        self.assertEqual(context["files"]["README.md"], "relative source")
+        with self.assertRaises(RuntimeError):
+            mod.list_worktrees(project="unavailable")
 
     def test_list_worktrees_detects_main_and_linked(self) -> None:
         main_repo = self._init_repo("wt_main")
@@ -558,6 +594,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("rb_deny")
         self._commit_file(repo, "base.txt", "base")
         (repo / ".env").write_text("SECRET=key", encoding="utf-8")
+        (repo / ".env.example").write_text("PUBLIC=value", encoding="utf-8")
+        (repo / "nested").mkdir()
+        (repo / "nested/.env.example").write_text(
+            "NESTED_SECRET=value",
+            encoding="utf-8",
+        )
         config = self._make_project_yml(
             '  rb_deny:\n'
             '    source: ' + str(repo) + '\n'
@@ -572,7 +614,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_deny", mode="A")
         self.assertIn(".env", manifest["redacted_paths"])
-        self.assertNotIn(".env", result.get("content", ""))
+        self.assertIn("nested/.env.example", manifest["redacted_paths"])
+        self.assertIn(".env.example", manifest["untracked"])
+        self.assertIn(".env.example", manifest["changed_files"])
+        self.assertIn("PUBLIC=value", result["content"])
+        self.assertNotIn("SECRET=key", result.get("content", ""))
+        self.assertNotIn("NESTED_SECRET=value", result.get("content", ""))
 
     def test_tracked_nested_env_absent_from_diff_and_file_contents(self) -> None:
         repo = self._init_repo("rb_nest_env")
@@ -923,14 +970,27 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_module_imports_without_tmpdir(self) -> None:
         import importlib.util
         server_py = Path(__file__).resolve().parents[1] / "server.py"
-        spec = importlib.util.spec_from_file_location("_server_import", server_py)
-        if spec is None or spec.loader is None:
-            raise AssertionError("Cannot load server.py for import test")
-        loader = spec.loader
-        module = importlib.util.module_from_spec(spec)
-        loader.exec_module(module)
-        self.assertTrue(hasattr(module, "list_projects"))
-        self.assertTrue(hasattr(module, "get_review_bundle"))
+        old_host = os.environ.get("BEE_DEV_MCP_HOST")
+        old_port = os.environ.get("BEE_DEV_MCP_PORT")
+        old_config = os.environ.get("BEE_MCP_CONFIG")
+        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+        os.environ["BEE_DEV_MCP_PORT"] = "8765"
+        try:
+            spec = importlib.util.spec_from_file_location("_server_import", server_py)
+            if spec is None or spec.loader is None:
+                raise AssertionError("Cannot load server.py for import test")
+            loader = spec.loader
+            module = importlib.util.module_from_spec(spec)
+            loader.exec_module(module)
+            self.assertTrue(hasattr(module, "list_projects"))
+            self.assertTrue(hasattr(module, "get_review_bundle"))
+        finally:
+            for k, v in [("BEE_DEV_MCP_HOST", old_host), ("BEE_DEV_MCP_PORT", old_port),
+                         ("BEE_MCP_CONFIG", old_config)]:
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_related_symlink_to_denied_file_not_read(self) -> None:
         main_repo = self._init_repo("rel_main")
@@ -3137,6 +3197,141 @@ class ReadOnlyToolsTests(unittest.TestCase):
                 target="manifest_cursor_omitted", mode="A", cursor=cursor
             )
 
+    def test_missing_host_raises_runtime_error(self) -> None:
+        server_py = Path(__file__).resolve().parents[1] / "server.py"
+        config_path = self.root / "_test_config_empty.yml"
+        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
+                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
+                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
+        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
+                                                     "BEE_MCP_CONFIG")}
+        os.environ["BEE_DEV_MCP_PORT"] = "8765"
+        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        try:
+            spec = importlib.util.spec_from_file_location("_test_no_host", server_py)
+            if spec is None or spec.loader is None:
+                raise AssertionError("Cannot load server.py")
+            loader = spec.loader
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaises(RuntimeError) as ctx:
+                loader.exec_module(module)
+            self.assertIn("BEE_DEV_MCP_HOST", str(ctx.exception))
+        finally:
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    def test_missing_port_raises_runtime_error(self) -> None:
+        server_py = Path(__file__).resolve().parents[1] / "server.py"
+        config_path = self.root / "_test_config_no_port.yml"
+        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
+                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
+                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
+        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
+                                                     "BEE_MCP_CONFIG")}
+        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        try:
+            spec = importlib.util.spec_from_file_location("_test_no_port", server_py)
+            if spec is None or spec.loader is None:
+                raise AssertionError("Cannot load server.py")
+            loader = spec.loader
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaises(RuntimeError) as ctx:
+                loader.exec_module(module)
+            self.assertIn("BEE_DEV_MCP_PORT", str(ctx.exception))
+        finally:
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    def test_invalid_port_raises_runtime_error(self) -> None:
+        server_py = Path(__file__).resolve().parents[1] / "server.py"
+        config_path = self.root / "_test_config_bad_port.yml"
+        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
+                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
+                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
+        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
+                                                     "BEE_MCP_CONFIG")}
+        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+        os.environ["BEE_DEV_MCP_PORT"] = "99999"
+        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        try:
+            spec = importlib.util.spec_from_file_location("_test_bad_port", server_py)
+            if spec is None or spec.loader is None:
+                raise AssertionError("Cannot load server.py")
+            loader = spec.loader
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaises(RuntimeError) as ctx:
+                loader.exec_module(module)
+            self.assertIn("65535", str(ctx.exception))
+        finally:
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    def test_non_numeric_port_raises_runtime_error(self) -> None:
+        server_py = Path(__file__).resolve().parents[1] / "server.py"
+        config_path = self.root / "_test_config_nan_port.yml"
+        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
+                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
+                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
+        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
+                                                     "BEE_MCP_CONFIG")}
+        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+        os.environ["BEE_DEV_MCP_PORT"] = "not-a-number"
+        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        try:
+            spec = importlib.util.spec_from_file_location("_test_nan_port", server_py)
+            if spec is None or spec.loader is None:
+                raise AssertionError("Cannot load server.py")
+            loader = spec.loader
+            module = importlib.util.module_from_spec(spec)
+            with self.assertRaises(RuntimeError) as ctx:
+                loader.exec_module(module)
+            self.assertIn("integer", str(ctx.exception).lower())
+        finally:
+            for k, v in old.items():
+                if v is not None:
+                    os.environ[k] = v
+                else:
+                    os.environ.pop(k, None)
+
+    def test_default_config_path_points_to_config_projects_yml(self) -> None:
+        import importlib.util
+        server_py = ROOT / "server.py"
+        source = server_py.read_text(encoding="utf-8")
+        self.assertIn('HERE / "config" / "projects.yml"', source)
+        self.assertNotIn('HERE / "projects.yml"', source)
+
+    def test_valid_host_port_passed_to_fastmcp(self) -> None:
+        repo = self._init_repo("valid_host_port")
+        self._commit_file(repo, "f.txt", "x")
+        config = self._make_project_yml(
+            '  valid_host_port:\n'
+            '    source: ' + str(repo) + '\n'
+            '    base_branch: main\n'
+            '    context_modes:\n'
+            '      A:\n'
+            '        files: []\n'
+        )
+        mod = self._import_server(config)
+        self.assertEqual(mod.MCP_HOST, "127.0.0.1")
+        self.assertEqual(mod.MCP_PORT, 8765)
+        # Verify tools still load correctly
+        tools = mod.mcp._tool_manager.list_tools()
+        self.assertEqual(len(tools), 8)
+
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
     def test_live_tools_list_uses_streamable_http_lifecycle(self) -> None:
@@ -3167,7 +3362,11 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 encoding="utf-8",
             )
             old_config = os.environ.get("BEE_MCP_CONFIG")
+            old_host = os.environ.get("BEE_DEV_MCP_HOST")
+            old_port = os.environ.get("BEE_DEV_MCP_PORT")
             os.environ["BEE_MCP_CONFIG"] = str(config)
+            os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+            os.environ["BEE_DEV_MCP_PORT"] = "8765"
             try:
                 spec = importlib.util.spec_from_file_location(
                     "transport_server", ROOT / "server.py"
@@ -3211,6 +3410,14 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                     os.environ.pop("BEE_MCP_CONFIG", None)
                 else:
                     os.environ["BEE_MCP_CONFIG"] = old_config
+                if old_host is None:
+                    os.environ.pop("BEE_DEV_MCP_HOST", None)
+                else:
+                    os.environ["BEE_DEV_MCP_HOST"] = old_host
+                if old_port is None:
+                    os.environ.pop("BEE_DEV_MCP_PORT", None)
+                else:
+                    os.environ["BEE_DEV_MCP_PORT"] = old_port
 
 
 if __name__ == "__main__":
