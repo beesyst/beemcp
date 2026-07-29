@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import os
 import asyncio
 import importlib.util
+import os
 import subprocess
 import tempfile
 import threading
@@ -10,7 +10,6 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
 
 TMP_ROOT: Path | None = None
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +55,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
     @classmethod
     def _cleanup(cls) -> None:
         import shutil
+
         shutil.rmtree(cls.root, ignore_errors=True)
 
     def _init_repo(self, name: str) -> Path:
@@ -102,15 +102,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     def _import_server(self, config_text: str):
         import importlib.util
+
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config.yml"
         config_path.write_text(config_text, encoding="utf-8")
         old_config = os.environ.get("BEE_MCP_CONFIG")
         old_host = os.environ.get("BEE_DEV_MCP_HOST")
         old_port = os.environ.get("BEE_DEV_MCP_PORT")
+        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
         os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
         os.environ["BEE_DEV_MCP_PORT"] = "8765"
+        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
         try:
             spec = importlib.util.spec_from_file_location("_test_server", server_py)
             if spec is None or spec.loader is None:
@@ -132,18 +135,22 @@ class ReadOnlyToolsTests(unittest.TestCase):
                 os.environ.pop("BEE_DEV_MCP_PORT", None)
             else:
                 os.environ["BEE_DEV_MCP_PORT"] = old_port
+            if old_token is None:
+                os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+            else:
+                os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
 
     def test_list_projects_returns_allowlisted_projects_and_modes(self) -> None:
         repo = self._init_repo("proj_a")
         self._commit_file(repo, "README.md")
         config = self._make_project_yml(
-            '  proj_a:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - README.md\n'
+            "  proj_a:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
         )
         mod = self._import_server(config)
         result = mod.list_projects()
@@ -159,19 +166,19 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("relative_source")
         self._commit_file(repo, "README.md", "relative source")
         config = self._make_project_yml(
-            '  existing:\n'
-            '    source: relative_source\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - README.md\n'
-            '  unavailable:\n'
-            '    source: missing-sibling\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  existing:\n"
+            "    source: relative_source\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
+            "  unavailable:\n"
+            "    source: missing-sibling\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
 
         mod = self._import_server(config)
@@ -185,14 +192,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         main_repo = self._init_repo("wt_main")
         self._commit_file(main_repo, "file.txt")
         wt_path = self.root / "wt_linked"
-        _run_git(["git", "worktree", "add", "--detach", str(wt_path), "main"], main_repo)
+        _run_git(
+            ["git", "worktree", "add", "--detach", str(wt_path), "main"], main_repo
+        )
         config = self._make_project_yml(
-            '  wt_main:\n'
-            '    source: ' + str(main_repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  wt_main:\n"
+            "    source: " + str(main_repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.list_worktrees(project="wt_main")
@@ -225,12 +234,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         wt_path = self.root / "wt_base-pr123"
         _run_git(["git", "worktree", "add", str(wt_path), branch_name], main_repo)
         config = self._make_project_yml(
-            '  wt_base:\n'
-            '    source: ' + str(main_repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  wt_base:\n"
+            "    source: " + str(main_repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.list_worktrees(project="wt_base")
@@ -244,12 +253,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo_b = self._init_repo("wto_b")
         self._commit_file(repo_b, "b.txt")
         config = self._make_project_yml(
-            '  wto_a:\n'
-            '    source: ' + str(repo_a) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  wto_a:\n"
+            "    source: " + str(repo_a) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(ValueError):
@@ -259,12 +268,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("known_only")
         self._commit_file(repo, "x.txt")
         config = self._make_project_yml(
-            '  known_only:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  known_only:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(ValueError):
@@ -275,13 +284,13 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "README.md", "# Readme")
         self._commit_file(repo, "SECRET.txt", "shh")
         config = self._make_project_yml(
-            '  mode_a:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - README.md\n'
+            "  mode_a:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
         )
         mod = self._import_server(config)
         result = mod.get_project_context(target="mode_a", mode="A")
@@ -293,17 +302,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "README.md", "# R")
         self._commit_file(repo, "config.yml", "key: val")
         config = self._make_project_yml(
-            '  mode_b:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - README.md\n'
-            '      B:\n'
-            '        extends: A\n'
-            '        files:\n'
-            '          - config.yml\n'
+            "  mode_b:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
+            "      B:\n"
+            "        extends: A\n"
+            "        files:\n"
+            "          - config.yml\n"
         )
         mod = self._import_server(config)
         result = mod.get_project_context(target="mode_b", mode="B")
@@ -317,17 +326,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "src/util.py", "def f(): pass")
         self._commit_file(repo, "docs/guide.md", "# Guide")
         config = self._make_project_yml(
-            '  mode_c:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - README.md\n'
-            '      C:\n'
-            '        extends: A\n'
-            '        tree_roots:\n'
-            '          - src\n'
+            "  mode_c:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - README.md\n"
+            "      C:\n"
+            "        extends: A\n"
+            "        tree_roots:\n"
+            "          - src\n"
         )
         mod = self._import_server(config)
         result = mod.get_project_context(target="mode_c", mode="C")
@@ -424,23 +433,23 @@ class ReadOnlyToolsTests(unittest.TestCase):
         proj_b = self._init_repo("rel_b")
         self._commit_file(proj_b, "docs/ROADMAP.md", "# Roadmap B")
         config = self._make_project_yml(
-            '  rel_a:\n'
-            '    source: ' + str(proj_a) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - docs/ROADMAP.md\n'
-            '    related:\n'
-            '      - project: rel_b\n'
-            '        files:\n'
-            '          - docs/ROADMAP.md\n'
-            '  rel_b:\n'
-            '    source: ' + str(proj_b) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rel_a:\n"
+            "    source: " + str(proj_a) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - docs/ROADMAP.md\n"
+            "    related:\n"
+            "      - project: rel_b\n"
+            "        files:\n"
+            "          - docs/ROADMAP.md\n"
+            "  rel_b:\n"
+            "    source: " + str(proj_b) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_project_context(target="rel_a", mode="A")
@@ -452,15 +461,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "feature.txt", "feature")
         config = self._make_project_yml(
-            '  rb_commit:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_commit:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_commit", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("feature.txt", manifest["changed_files"])
@@ -471,15 +481,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "staged.txt").write_text("staged", encoding="utf-8")
         _run_git(["git", "add", "staged.txt"], repo)
         config = self._make_project_yml(
-            '  rb_staged:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_staged:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_staged", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("staged.txt", manifest["changed_files"])
@@ -489,15 +500,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "base.txt").write_text("modified", encoding="utf-8")
         config = self._make_project_yml(
-            '  rb_unstaged:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_unstaged:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_unstaged", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("base.txt", manifest["changed_files"])
@@ -507,15 +519,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "new_file.txt").write_text("untracked", encoding="utf-8")
         config = self._make_project_yml(
-            '  rb_untracked:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_untracked:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_untracked", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("new_file.txt", manifest["untracked"])
@@ -528,15 +541,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "todelete.txt"], repo)
         _run_git(["git", "commit", "-m", "delete todelete.txt"], repo)
         config = self._make_project_yml(
-            '  rb_deleted:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_deleted:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_deleted", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_deleted", mode="A")
@@ -551,15 +565,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "mv", "old.txt", "new.txt"], repo)
         _run_git(["git", "commit", "-m", "rename old to new"], repo)
         config = self._make_project_yml(
-            '  rb_rename:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_rename:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_rename", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertTrue(
@@ -575,15 +590,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "base.txt").write_text("updated content", encoding="utf-8")
         config = self._make_project_yml(
-            '  rb_contents:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_contents:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_contents", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_contents", mode="A")
@@ -601,15 +617,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
             encoding="utf-8",
         )
         config = self._make_project_yml(
-            '  rb_deny:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_deny:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_deny", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_deny", mode="A")
@@ -631,15 +648,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "sub/.env"], repo)
         _run_git(["git", "commit", "-m", "add nested .env"], repo)
         config = self._make_project_yml(
-            '  rb_nest_env:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_nest_env:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_nest_env", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_nest_env", mode="A")
@@ -652,12 +670,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / ".env").write_text("SECRET=key", encoding="utf-8")
         (repo / "alias.txt").symlink_to(".env")
         config = self._make_project_yml(
-            '  rb_alias:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_alias:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_alias", mode="A")
@@ -670,12 +688,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         escape_target.write_text("escaped", encoding="utf-8")
         (repo / "escape.txt").symlink_to(os.path.relpath(escape_target, repo))
         config = self._make_project_yml(
-            '  rb_escape:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_escape:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_escape", mode="A")
@@ -686,12 +704,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "broken.txt").symlink_to("nonexistent")
         config = self._make_project_yml(
-            '  rb_broken:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_broken:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_broken", mode="A")
@@ -705,12 +723,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "data.bin"], repo)
         _run_git(["git", "commit", "-m", "add binary"], repo)
         config = self._make_project_yml(
-            '  rb_binary:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_binary:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="rb_binary", mode="A")
@@ -725,33 +743,37 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "large.txt"], repo)
         _run_git(["git", "commit", "-m", "add large"], repo)
         config = self._make_project_yml(
-            '  rb_oversized:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_oversized:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_oversized", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_oversized", mode="A")
         self.assertNotIn("large.txt", result.get("content", ""))
         omitted_paths = {o["path"] for o in manifest["omitted_files"]}
-        self.assertIn("large.txt", omitted_paths,
-                      msg=f"large.txt not in omitted: {manifest['omitted_files']}")
+        self.assertIn(
+            "large.txt",
+            omitted_paths,
+            msg=f"large.txt not in omitted: {manifest['omitted_files']}",
+        )
 
     def test_read_project_file_rejects_absolute_path(self) -> None:
         repo = self._init_repo("rpf_abs")
         self._commit_file(repo, "safe.txt", "safe")
         config = self._make_project_yml(
-            '  rpf_abs:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rpf_abs:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises((ValueError, RuntimeError)):
@@ -761,12 +783,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("rpf_dotdot")
         self._commit_file(repo, "safe.txt", "safe")
         config = self._make_project_yml(
-            '  rpf_dotdot:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rpf_dotdot:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises((ValueError, RuntimeError)):
@@ -777,14 +799,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "src/main.py", "def hello(): pass")
         self._commit_file(repo, "README.md", "# Hello World")
         config = self._make_project_yml(
-            '  search_fixed:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - src/main.py\n'
-            '          - README.md\n'
+            "  search_fixed:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - src/main.py\n"
+            "          - README.md\n"
         )
         mod = self._import_server(config)
         sr = mod.search_project(target="search_fixed", query="hello", mode="A")
@@ -798,13 +820,13 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("search_val")
         self._commit_file(repo, "f.txt", "content")
         config = self._make_project_yml(
-            '  search_val:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - f.txt\n'
+            "  search_val:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - f.txt\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(ValueError):
@@ -820,12 +842,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("valid_proj")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  valid_proj:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  valid_proj:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(ValueError):
@@ -837,22 +859,24 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     def test_all_tool_annotations_are_toolannotations(self) -> None:
         from mcp.types import ToolAnnotations
+
         repo = self._init_repo("ro_check")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  ro_check:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  ro_check:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         tools = mod.mcp._tool_manager.list_tools()
         for t in tools:
             self.assertIsInstance(
-                t.annotations, ToolAnnotations,
-                f"Tool {t.name} annotations is not ToolAnnotations"
+                t.annotations,
+                ToolAnnotations,
+                f"Tool {t.name} annotations is not ToolAnnotations",
             )
             self.assertTrue(
                 t.annotations.readOnlyHint,
@@ -867,19 +891,24 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("no_agent")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  no_agent:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  no_agent:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         tools = mod.mcp._tool_manager.list_tools()
         tool_names = [t.name for t in tools]
         forbidden = [
-            "prepare_run", "start_copilot_initial", "start_codex_fix",
-            "get_job", "get_diff", "read_changed_file", "run_checks",
+            "prepare_run",
+            "start_copilot_initial",
+            "start_codex_fix",
+            "get_job",
+            "get_diff",
+            "read_changed_file",
+            "run_checks",
             "discard_run",
         ]
         for name in forbidden:
@@ -887,15 +916,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     def test_health_readiness_routes_work(self) -> None:
         import asyncio
+
         repo = self._init_repo("health_test")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  health_test:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  health_test:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         app = mod.mcp.streamable_http_app()
@@ -910,15 +940,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_versionz_returns_identity_and_no_leaks(self) -> None:
         import asyncio
         import json
+
         repo = self._init_repo("ver_test")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  ver_test:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  ver_test:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         app = mod.mcp.streamable_http_app()
@@ -930,8 +961,8 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(data["service"], "bee-dev-mcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
-        self.assertEqual(data["tool_contract_version"], 2)
-        self.assertEqual(data["tool_count"], 8)
+        self.assertEqual(data["tool_contract_version"], 3)
+        self.assertEqual(data["tool_count"], 9)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -951,16 +982,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("tunnel", serialized.lower())
         self.assertNotIn("env", serialized.lower())
 
-    def test_mcp_tools_list_contains_exactly_eight_expected(self) -> None:
+    def test_mcp_tools_list_contains_exactly_nine_expected(self) -> None:
         repo = self._init_repo("tools_count")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  tools_count:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  tools_count:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         tools = mod.mcp._tool_manager.list_tools()
@@ -969,12 +1000,15 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     def test_module_imports_without_tmpdir(self) -> None:
         import importlib.util
+
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         old_host = os.environ.get("BEE_DEV_MCP_HOST")
         old_port = os.environ.get("BEE_DEV_MCP_PORT")
         old_config = os.environ.get("BEE_MCP_CONFIG")
+        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
         os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
         os.environ["BEE_DEV_MCP_PORT"] = "8765"
+        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
         try:
             spec = importlib.util.spec_from_file_location("_server_import", server_py)
             if spec is None or spec.loader is None:
@@ -985,8 +1019,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
             self.assertTrue(hasattr(module, "list_projects"))
             self.assertTrue(hasattr(module, "get_review_bundle"))
         finally:
-            for k, v in [("BEE_DEV_MCP_HOST", old_host), ("BEE_DEV_MCP_PORT", old_port),
-                         ("BEE_MCP_CONFIG", old_config)]:
+            for k, v in [
+                ("BEE_DEV_MCP_HOST", old_host),
+                ("BEE_DEV_MCP_PORT", old_port),
+                ("BEE_MCP_CONFIG", old_config),
+                ("BEE_DEV_MCP_GITHUB_TOKEN", old_token),
+            ]:
                 if v is None:
                     os.environ.pop(k, None)
                 else:
@@ -1003,23 +1041,23 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "-A"], related_repo)
         _run_git(["git", "commit", "-m", "init"], related_repo)
         config = self._make_project_yml(
-            '  rel_main:\n'
-            '    source: ' + str(main_repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files:\n'
-            '          - docs/guide.md\n'
-            '    related:\n'
-            '      - project: rel_sec\n'
-            '        files:\n'
-            '          - docs/config.txt\n'
-            '  rel_sec:\n'
-            '    source: ' + str(related_repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rel_main:\n"
+            "    source: " + str(main_repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files:\n"
+            "          - docs/guide.md\n"
+            "    related:\n"
+            "      - project: rel_sec\n"
+            "        files:\n"
+            "          - docs/config.txt\n"
+            "  rel_sec:\n"
+            "    source: " + str(related_repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_project_context(target="rel_main", mode="A")
@@ -1064,17 +1102,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "commit", "-m", "orphan commit"], repo)
         # HEAD is on orphan, base_branch is main - no shared history
         config = self._make_project_yml(
-            '  mg_fail:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  mg_fail:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(RuntimeError):
             mod.get_review_bundle(target="mg_fail", mode="A")
-
 
     def test_deleted_denied_file_not_in_diff(self) -> None:
         repo = self._init_repo("rb_del_deny")
@@ -1084,15 +1121,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", ".env"], repo)
         _run_git(["git", "commit", "-m", "delete .env"], repo)
         config = self._make_project_yml(
-            '  rb_del_deny:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  rb_del_deny:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_del_deny", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_del_deny", mode="A")
@@ -1148,15 +1186,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "old.txt").rename(repo / "new.txt")
         _run_git(["git", "add", "-A"], repo)
         config = self._make_project_yml(
-            '  stg_ren:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  stg_ren:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="stg_ren", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="stg_ren", mode="A")
@@ -1176,15 +1215,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "old.txt", "rename me")
         _run_git(["git", "mv", "old.txt", "new.txt"], repo)
         config = self._make_project_yml(
-            '  stg_ren2:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  stg_ren2:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="stg_ren2", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="stg_ren2", mode="A")
@@ -1206,15 +1246,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "mv", ".env", "config.env"], repo)
         _run_git(["git", "commit", "-m", "rename .env to config.env"], repo)
         config = self._make_project_yml(
-            '  den_ren:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  den_ren:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="den_ren", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="den_ren", mode="A")
@@ -1228,10 +1269,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
             msg=f"config.env not in redacted_paths: {manifest.get('redacted_paths')}",
         )
 
-    def _chunk_config(self, repo: Path, name: str,
-                      max_file_bytes: int = 100,
-                      max_context_chars: int = 200,
-                      max_review_page_chars: int = 30000) -> str:
+    def _chunk_config(
+        self,
+        repo: Path,
+        name: str,
+        max_file_bytes: int = 100,
+        max_context_chars: int = 200,
+        max_review_page_chars: int = 30000,
+    ) -> str:
         return (
             "limits:\n"
             f"  max_file_bytes: {max_file_bytes}\n"
@@ -1264,8 +1309,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
         chunks: list[str] = []
         sl, sc = 1, 0
         while True:
-            r = mod.read_project_file(target="rpf_seq", path="big.txt",
-                                      start_line=sl, start_column=sc)
+            r = mod.read_project_file(
+                target="rpf_seq", path="big.txt", start_line=sl, start_column=sc
+            )
             self.assertEqual(r["path"], "big.txt")
             self.assertEqual(r["start_line"], sl)
             self.assertEqual(r["start_column"], sc)
@@ -1380,10 +1426,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             f"          - big.log\n"
         )
         mod = self._import_server(config)
-        sr = mod.search_project(target="srch_ovr", query="SEARCH_ME",
-                                mode="A")
-        self.assertTrue(len(sr["results"]) >= 1,
-                        msg="should find matches in oversized file")
+        sr = mod.search_project(target="srch_ovr", query="SEARCH_ME", mode="A")
+        self.assertTrue(
+            len(sr["results"]) >= 1, msg="should find matches in oversized file"
+        )
         found_lines = {r["line"] for r in sr["results"]}
         self.assertIn(1, found_lines, msg="line 1 should be found")
         self.assertIn(39, found_lines, msg="line 39 should be found")
@@ -1415,10 +1461,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         chunks: list[str] = []
         sl, sc = 1, 0
         while True:
-            r = mod.read_project_file(target="rpf_longln", path="long.txt",
-                                      start_line=sl, start_column=sc)
-            self.assertLessEqual(len(r["content"]), 100,
-                                 msg="chunk exceeds max_context_chars")
+            r = mod.read_project_file(
+                target="rpf_longln", path="long.txt", start_line=sl, start_column=sc
+            )
+            self.assertLessEqual(
+                len(r["content"]), 100, msg="chunk exceeds max_context_chars"
+            )
             chunks.append(r["content"])
             if r["next_line"] is None and r["next_column"] is None:
                 break
@@ -1428,8 +1476,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
             )
             sl, sc = r["next_line"], r["next_column"]
 
-        self.assertEqual("".join(chunks), text,
-                         msg="reassembled content must match original")
+        self.assertEqual(
+            "".join(chunks), text, msg="reassembled content must match original"
+        )
 
     def test_context_limit_reason_in_omitted_files(self) -> None:
         repo = self._init_repo("gpc_ctxlim")
@@ -1464,10 +1513,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
         omitted = result["omitted_files"]
         reasons = {o["reason"] for o in omitted}
         paths = {o["path"] for o in omitted}
-        self.assertIn("context_limit", reasons,
-                      msg="context_limit reason must be present")
-        self.assertIn("b.txt", paths,
-                      msg="b.txt should be omitted (budget exhausted)")
+        self.assertIn(
+            "context_limit", reasons, msg="context_limit reason must be present"
+        )
+        self.assertIn("b.txt", paths, msg="b.txt should be omitted (budget exhausted)")
 
     def test_related_omitted_files_contains_oversized_reason(self) -> None:
         main_repo = self._init_repo("rel_omit_main")
@@ -1509,14 +1558,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
         self.assertIn("related_omitted_files", result)
         related_omit = result["related_omitted_files"]
-        self.assertTrue(len(related_omit) >= 1,
-                        msg="should have at least one related omitted entry")
+        self.assertTrue(
+            len(related_omit) >= 1, msg="should have at least one related omitted entry"
+        )
         found = any(
             o["target"] == "rel_omit_rel" and o["path"] == "big.txt"
             for o in related_omit
         )
-        self.assertTrue(found,
-                        msg="rel_omit_rel/big.txt should be in related_omitted")
+        self.assertTrue(found, msg="rel_omit_rel/big.txt should be in related_omitted")
 
     def test_search_finds_match_across_segments(self) -> None:
         repo = self._init_repo("srch_segments")
@@ -1578,8 +1627,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
         mod = self._import_server(config)
         sr = mod.search_project(target="srch_total", query="MATCH", mode="A")
         total = sum(len(r["text"]) for r in sr["results"])
-        self.assertLessEqual(total, 500,
-                             msg=f"total search response too large: {total}")
+        self.assertLessEqual(
+            total, 500, msg=f"total search response too large: {total}"
+        )
 
     def test_review_bundle_omitted_includes_context_and_related(self) -> None:
         repo = self._init_repo("rb_omit_ctx")
@@ -1620,6 +1670,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="rb_omit_ctx", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         result = mod.get_review_bundle(target="rb_omit_ctx", mode="A")
@@ -1633,9 +1684,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_search_serialized_size_respected(self) -> None:
         repo = self._init_repo("srch_ser")
         lines = [
-            'simple line\n',
+            "simple line\n",
             'line with "quotes" and \\backslash\n',
-            'line with unicode: \u00e9\u00e0\u00fc\u00f1\n',
+            "line with unicode: \u00e9\u00e0\u00fc\u00f1\n",
             "line with tab\tand \x01control\x02chars\n",
         ]
         self._commit_file(repo, "data.log", "".join(lines))
@@ -1660,14 +1711,15 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         import json
+
         sr = mod.search_project(target="srch_ser", query="line", mode="A")
-        self.assertTrue(len(sr["results"]) > 0,
-                        msg="search should find matches")
+        self.assertTrue(len(sr["results"]) > 0, msg="search should find matches")
         serialized = json.dumps(sr, ensure_ascii=False)
         self.assertLessEqual(
-            len(serialized), 200,
+            len(serialized),
+            200,
             msg=f"serialized search response ({len(serialized)} bytes) "
-                f"exceeds max_context_chars=200",
+            f"exceeds max_context_chars=200",
         )
 
     def test_oversized_rename_not_in_diff(self) -> None:
@@ -1698,6 +1750,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(
             target="rb_rename_oversized",
             mode="A",
@@ -1711,8 +1764,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
         self.assertTrue(
             any(
-                rename["from"] == "old.txt"
-                and rename["to"] == "new.txt"
+                rename["from"] == "old.txt" and rename["to"] == "new.txt"
                 for rename in manifest["renamed"]
             )
         )
@@ -1720,12 +1772,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("new.txt", result["content"])
         self.assertTrue(
             any(
-                item["path"] == "new.txt"
-                and item["reason"] == "oversized"
+                item["path"] == "new.txt" and item["reason"] == "oversized"
                 for item in manifest["omitted_files"]
             )
         )
-
 
     def test_config_missing_max_review_page_chars_fails_fast(self) -> None:
         repo = self._init_repo("cfg_no_page")
@@ -1801,15 +1851,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "new.txt", "new content")
         config = self._make_project_yml(
-            '  man_one:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_one:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_one", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertEqual(manifest["target"], "man_one")
@@ -1830,15 +1881,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "base.txt").write_text("unstaged", encoding="utf-8")
         (repo / "untracked.txt").write_text("untracked", encoding="utf-8")
         config = self._make_project_yml(
-            '  man_sep:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_sep:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_sep", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("committed.txt", manifest["committed"])
@@ -1854,15 +1906,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "todel.txt"], repo)
         _run_git(["git", "commit", "-m", "delete"], repo)
         config = self._make_project_yml(
-            '  man_del:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_del:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_del", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("todel.txt", manifest["deleted"])
@@ -1875,19 +1928,23 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "mv", "old.txt", "new.txt"], repo)
         _run_git(["git", "commit", "-m", "rename"], repo)
         config = self._make_project_yml(
-            '  man_ren:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_ren:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_ren", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertTrue(
-            any(r["from"] == "old.txt" and r["to"] == "new.txt" for r in manifest["renamed"])
+            any(
+                r["from"] == "old.txt" and r["to"] == "new.txt"
+                for r in manifest["renamed"]
+            )
         )
 
     def test_manifest_returns_base_branch_and_merge_base(self) -> None:
@@ -1896,15 +1953,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "new.txt", "new")
         config = self._make_project_yml(
-            '  man_mb:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_mb:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_mb", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertEqual(manifest["base_branch"], "main")
@@ -1921,15 +1979,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "commit", "-m", "modify both"], repo)
         (repo / "both.txt").write_text("unstaged change", encoding="utf-8")
         config = self._make_project_yml(
-            '  man_dedup:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_dedup:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_dedup", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertEqual(len(manifest["changed_files"]), 1)
@@ -1941,15 +2000,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "data.txt", "sensitive data")
         config = self._make_project_yml(
-            '  man_no_fc:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  man_no_fc:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="man_no_fc", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertNotIn("file_contents", manifest)
@@ -1961,12 +2021,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / ".env").write_text("SECRET=key", encoding="utf-8")
         config = self._make_project_yml(
-            '  pag_deny:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_deny:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="pag_deny", mode="A")
@@ -1980,12 +2040,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "data.bin"], repo)
         _run_git(["git", "commit", "-m", "add binary"], repo)
         config = self._make_project_yml(
-            '  pag_bin:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_bin:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="pag_bin", mode="A")
@@ -1998,12 +2058,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         escape_target.write_text("escaped", encoding="utf-8")
         (repo / "escape.txt").symlink_to(os.path.relpath(escape_target, repo))
         config = self._make_project_yml(
-            '  pag_esc:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_esc:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="pag_esc", mode="A")
@@ -2018,15 +2078,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "large.txt"], repo)
         _run_git(["git", "commit", "-m", "add large"], repo)
         config = self._make_project_yml(
-            '  pag_ovr:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_ovr:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="pag_ovr", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         omitted_paths = {o["path"] for o in manifest["omitted_files"]}
@@ -2038,12 +2099,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "small.txt", "hello")
         config = self._make_project_yml(
-            '  pag_one:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_one:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="pag_one", mode="A")
@@ -2106,14 +2167,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_diff_page_stops_stream_after_page_is_full(self) -> None:
         repo = self._init_repo("stream_page")
         self._commit_file(repo, "base.txt", "base")
-        mod = self._import_server(self._make_project_yml(
-            "  stream_page:\n"
-            f"    source: {repo}\n"
-            "    base_branch: main\n"
-            "    context_modes:\n"
-            "      A:\n"
-            "        files: []\n"
-        ))
+        mod = self._import_server(
+            self._make_project_yml(
+                "  stream_page:\n"
+                f"    source: {repo}\n"
+                "    base_branch: main\n"
+                "    context_modes:\n"
+                "      A:\n"
+                "        files: []\n"
+            )
+        )
         state = {"yielded": 0, "closed": False}
 
         def fake_stream(_inventory: dict[str, object]):
@@ -2139,16 +2202,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("pag_cv")
         self._commit_file(repo, "base.txt", "base")
         config = self._make_project_yml(
-            '  pag_cv:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  pag_cv:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(ValueError):
-            mod.get_review_bundle_page(target="pag_cv", mode="A", cursor="not-valid-base64!!!")
+            mod.get_review_bundle_page(
+                target="pag_cv", mode="A", cursor="not-valid-base64!!!"
+            )
 
     def test_cursor_wrong_target_rejected(self) -> None:
         repo_a = self._init_repo("pag_wta")
@@ -2193,9 +2258,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         bad_cursor = page["next_cursor"]
         self.assertIsNotNone(bad_cursor)
         with self.assertRaises(ValueError):
-            mod.get_review_bundle_page(
-                target="pag_wtb", mode="A", cursor=bad_cursor
-            )
+            mod.get_review_bundle_page(target="pag_wtb", mode="A", cursor=bad_cursor)
 
     def test_cursor_stale_snapshot_rejected(self) -> None:
         repo = self._init_repo("pag_stale")
@@ -2228,9 +2291,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIsNotNone(old_cursor)
         (repo / "big.txt").write_text(big + "\nEXTRA", encoding="utf-8")
         with self.assertRaises(ValueError):
-            mod.get_review_bundle_page(
-                target="pag_stale", mode="A", cursor=old_cursor
-            )
+            mod.get_review_bundle_page(target="pag_stale", mode="A", cursor=old_cursor)
 
     def test_committed_diff_present(self) -> None:
         repo = self._init_repo("diff_commit")
@@ -2238,12 +2299,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         self._commit_file(repo, "new.txt", "committed change")
         config = self._make_project_yml(
-            '  diff_commit:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_commit:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_commit", mode="A")
@@ -2255,12 +2316,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "staged.txt").write_text("staged change", encoding="utf-8")
         _run_git(["git", "add", "staged.txt"], repo)
         config = self._make_project_yml(
-            '  diff_stag:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_stag:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_stag", mode="A")
@@ -2271,12 +2332,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "base.txt").write_text("unstaged change", encoding="utf-8")
         config = self._make_project_yml(
-            '  diff_uns:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_uns:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_uns", mode="A")
@@ -2287,12 +2348,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         (repo / "untracked.txt").write_text("untracked content", encoding="utf-8")
         config = self._make_project_yml(
-            '  diff_untr:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_untr:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_untr", mode="A")
@@ -2306,12 +2367,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "todel.txt"], repo)
         _run_git(["git", "commit", "-m", "delete"], repo)
         config = self._make_project_yml(
-            '  diff_del:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_del:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_del", mode="A")
@@ -2325,12 +2386,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "mv", "old.txt", "new.txt"], repo)
         _run_git(["git", "commit", "-m", "rename"], repo)
         config = self._make_project_yml(
-            '  diff_ren:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  diff_ren:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="diff_ren", mode="A")
@@ -2414,12 +2475,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("tl_check")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  tl_check:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  tl_check:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         tools = mod.mcp._tool_manager.list_tools()
@@ -2433,19 +2494,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIn("get_project_context", names)
         self.assertIn("search_project", names)
 
-
     def test_unstaged_deleted_safe_file_in_diff(self) -> None:
         repo = self._init_repo("udel_safe")
         self._commit_file(repo, "base.txt", "base")
         self._commit_file(repo, "todel.txt", "delete me unstaged")
         (repo / "todel.txt").unlink()
         config = self._make_project_yml(
-            '  udel_safe:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  udel_safe:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="udel_safe", mode="A", cursor="")
@@ -2457,12 +2517,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "todel.txt", "delete me staged")
         _run_git(["git", "rm", "todel.txt"], repo)
         config = self._make_project_yml(
-            '  sdel_safe:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  sdel_safe:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="sdel_safe", mode="A", cursor="")
@@ -2478,15 +2538,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "data.bin"], repo)
         _run_git(["git", "commit", "-m", "delete binary"], repo)
         config = self._make_project_yml(
-            '  dbin_nocrash:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  dbin_nocrash:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="dbin_nocrash", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("data.bin", manifest["deleted"])
@@ -2504,15 +2565,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "large.txt"], repo)
         _run_git(["git", "commit", "-m", "delete large"], repo)
         config = self._make_project_yml(
-            '  dbin_omit:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  dbin_omit:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="dbin_omit", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         omitted_paths = {o["path"] for o in manifest["omitted_files"]}
@@ -2526,12 +2588,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "safe.txt"], repo)
         _run_git(["git", "commit", "-m", "delete safe"], repo)
         config = self._make_project_yml(
-            '  dblob_bytes:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  dblob_bytes:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="dblob_bytes", mode="A", cursor="")
@@ -2570,9 +2632,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         lines[-1] = "LINE 1999 " + "y" * 200
         (repo / "big.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
         with self.assertRaises(ValueError):
-            mod.get_review_bundle_page(
-                target="trunc_inv", mode="A", cursor=old_cursor
-            )
+            mod.get_review_bundle_page(target="trunc_inv", mode="A", cursor=old_cursor)
 
     def test_cursor_wrong_mode_rejected(self) -> None:
         repo = self._init_repo("pag_wmode")
@@ -2606,9 +2666,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         bad_cursor = page["next_cursor"]
         self.assertIsNotNone(bad_cursor)
         with self.assertRaises(ValueError):
-            mod.get_review_bundle_page(
-                target="pag_wmode", mode="B", cursor=bad_cursor
-            )
+            mod.get_review_bundle_page(target="pag_wmode", mode="B", cursor=bad_cursor)
 
     def test_get_review_bundle_no_full_manifest(self) -> None:
         repo = self._init_repo("bdl_no_man")
@@ -2618,12 +2676,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "new.txt"], repo)
         _run_git(["git", "commit", "-m", "add new"], repo)
         config = self._make_project_yml(
-            '  bdl_no_man:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  bdl_no_man:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         result = mod.get_review_bundle(target="bdl_no_man", mode="A")
@@ -2682,15 +2740,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "commit", "-m", "make oversized"], repo)
         _run_git(["git", "rm", "safe.txt"], repo)
         config = self._make_project_yml(
-            '  sdel_head_blob:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  sdel_head_blob:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="sdel_head_blob", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("safe.txt", manifest["deleted"])
@@ -2706,15 +2765,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "file.txt"], repo)
         (repo / "file.txt").unlink()
         config = self._make_project_yml(
-            '  udel_idx_blob:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  udel_idx_blob:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="udel_idx_blob", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         omitted_paths = {o["path"] for o in manifest["omitted_files"]}
@@ -2757,7 +2817,9 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "feature"], repo)
         for i in range(30):
-            (repo / f"file{i:02d}.txt").write_text(f"content {i} " + "x" * 3000, encoding="utf-8")
+            (repo / f"file{i:02d}.txt").write_text(
+                f"content {i} " + "x" * 3000, encoding="utf-8"
+            )
             _run_git(["git", "add", f"file{i:02d}.txt"], repo)
         _run_git(["git", "commit", "-m", "add many files"], repo)
         config = (
@@ -2779,13 +2841,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         mod = self._import_server(config)
         import json
+
         full = ""
         cursor = ""
         pages = 0
         while True:
-            _r = mod.get_review_manifest(
-                target="man_multi", mode="A", cursor=cursor
-            )
+            _r = mod.get_review_manifest(target="man_multi", mode="A", cursor=cursor)
             full += _r["content"]
             pages += 1
             if not _r["has_more"]:
@@ -2863,12 +2924,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "--orphan", "orphan"], repo)
         _run_git(["git", "commit", "-m", "orphan"], repo)
         config = self._make_project_yml(
-            '  git_fail:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  git_fail:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         with self.assertRaises(RuntimeError):
@@ -2905,6 +2966,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
     def test_stream_git_failure_propagates(self) -> None:
         import unittest.mock
+
         repo = self._init_repo("strm_fail")
         self._commit_file(repo, "base.txt", "base")
         _run_git(["git", "checkout", "-b", "feature"], repo)
@@ -2912,17 +2974,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "f.txt"], repo)
         _run_git(["git", "commit", "-m", "add f"], repo)
         config = self._make_project_yml(
-            '  strm_fail:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  strm_fail:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         inv = mod._git_inventory("strm_fail", "A")
         with unittest.mock.patch.object(
-            mod, "_stream_git_stdout",
+            mod,
+            "_stream_git_stdout",
             side_effect=RuntimeError("simulated stream failure"),
         ):
             with self.assertRaises(RuntimeError):
@@ -2938,15 +3001,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "rm", "large.txt"], repo)
         _run_git(["git", "commit", "-m", "delete large"], repo)
         config = self._make_project_yml(
-            '  odb_rej:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  odb_rej:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="odb_rej", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertIn("large.txt", manifest["deleted"])
@@ -2965,12 +3029,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "add", "large.txt"], repo)
         (repo / "large.txt").write_text("unstaged change", encoding="utf-8")
         config = self._make_project_yml(
-            '  unsafe_hist:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  unsafe_hist:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="unsafe_hist", mode="A", cursor="")
@@ -2982,12 +3046,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self._commit_file(repo, "big.txt", large)
         _run_git(["git", "mv", "big.txt", "small.txt"], repo)
         config = self._make_project_yml(
-            '  ren_ovr_excl:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  ren_ovr_excl:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="ren_ovr_excl", mode="A", cursor="")
@@ -2997,25 +3061,21 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_literal_pathspec_security(self) -> None:
         repo = self._init_repo("lit_path")
         (repo / ":(glob)*").write_text("safe content", encoding="utf-8")
-        _run_git(
-            ["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo
-        )
+        _run_git(["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo)
         _run_git(["git", "commit", "-m", "add literal"], repo)
         self._commit_file(repo, ".env", "SECRET=supersecret")
         _run_git(["git", "checkout", "-b", "feature"], repo)
         (repo / ":(glob)*").write_text("modified safe content", encoding="utf-8")
-        _run_git(
-            ["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo
-        )
+        _run_git(["git", "--literal-pathspecs", "add", "--", ":(glob)*"], repo)
         _run_git(["git", "commit", "-m", "modify literal"], repo)
         (repo / ".env").write_text("SECRET=leaked", encoding="utf-8")
         config = self._make_project_yml(
-            '  lit_path:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  lit_path:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(target="lit_path", mode="A", cursor="")
@@ -3032,15 +3092,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "mv", "old.txt", "new.txt"], repo)
         _run_git(["git", "commit", "-m", "rename"], repo)
         config = self._make_project_yml(
-            '  ren_conf:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  ren_conf:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         _r = mod.get_review_manifest(target="ren_conf", mode="A", cursor="")
         manifest = json.loads(_r["content"])
         self.assertTrue(
@@ -3061,12 +3122,12 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "layered.txt").write_text("staged replacement", encoding="utf-8")
         _run_git(["git", "add", "layered.txt"], repo)
         config = self._make_project_yml(
-            '  layered_branch_staged:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  layered_branch_staged:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         page = mod.get_review_bundle_page(
@@ -3079,19 +3140,18 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("layered_staged_untracked")
         self._commit_file(repo, "layered.txt", "committed content")
         _run_git(["git", "rm", "layered.txt"], repo)
-        (repo / "layered.txt").write_text(
-            "untracked replacement", encoding="utf-8"
-        )
+        (repo / "layered.txt").write_text("untracked replacement", encoding="utf-8")
         config = self._make_project_yml(
-            '  layered_staged_untracked:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  layered_staged_untracked:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         manifest_page = mod.get_review_manifest(
             target="layered_staged_untracked", mode="A", cursor=""
         )
@@ -3114,15 +3174,16 @@ class ReadOnlyToolsTests(unittest.TestCase):
         (repo / "layered.txt").write_text("safe replacement", encoding="utf-8")
         _run_git(["git", "add", "layered.txt"], repo)
         config = self._make_project_yml(
-            '  layered_unsafe_deleted:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  layered_unsafe_deleted:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         manifest_page = mod.get_review_manifest(
             target="layered_unsafe_deleted", mode="A", cursor=""
         )
@@ -3144,22 +3205,21 @@ class ReadOnlyToolsTests(unittest.TestCase):
         _run_git(["git", "checkout", "-b", "feature"], repo)
         (repo / path).write_text("nul safe content", encoding="utf-8")
         config = self._make_project_yml(
-            '  nul_safe_names:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  nul_safe_names:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         import json
+
         manifest_page = mod.get_review_manifest(
             target="nul_safe_names", mode="A", cursor=""
         )
         manifest = json.loads(manifest_page["content"])
-        page = mod.get_review_bundle_page(
-            target="nul_safe_names", mode="A", cursor=""
-        )
+        page = mod.get_review_bundle_page(target="nul_safe_names", mode="A", cursor="")
         self.assertEqual(manifest["changed_files"], [path])
         self.assertEqual(manifest["unstaged"], [path])
         self.assertIn("nul safe content", page["content"])
@@ -3200,12 +3260,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_missing_host_raises_runtime_error(self) -> None:
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config_empty.yml"
-        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
-                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
-                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
-                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
-        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
-                                                     "BEE_MCP_CONFIG")}
+        config_path.write_text(
+            "limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+            "  max_context_chars: 1\n  max_tree_entries: 1\n"
+            "  max_search_results: 1\n  max_review_page_chars: 1\n"
+            "deny_paths: []\nprojects: {}\n",
+            encoding="utf-8",
+        )
+        old = {
+            k: os.environ.pop(k, None)
+            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+        }
         os.environ["BEE_DEV_MCP_PORT"] = "8765"
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
         try:
@@ -3227,12 +3292,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_missing_port_raises_runtime_error(self) -> None:
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config_no_port.yml"
-        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
-                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
-                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
-                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
-        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
-                                                     "BEE_MCP_CONFIG")}
+        config_path.write_text(
+            "limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+            "  max_context_chars: 1\n  max_tree_entries: 1\n"
+            "  max_search_results: 1\n  max_review_page_chars: 1\n"
+            "deny_paths: []\nprojects: {}\n",
+            encoding="utf-8",
+        )
+        old = {
+            k: os.environ.pop(k, None)
+            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+        }
         os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
         try:
@@ -3254,12 +3324,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_invalid_port_raises_runtime_error(self) -> None:
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config_bad_port.yml"
-        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
-                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
-                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
-                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
-        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
-                                                     "BEE_MCP_CONFIG")}
+        config_path.write_text(
+            "limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+            "  max_context_chars: 1\n  max_tree_entries: 1\n"
+            "  max_search_results: 1\n  max_review_page_chars: 1\n"
+            "deny_paths: []\nprojects: {}\n",
+            encoding="utf-8",
+        )
+        old = {
+            k: os.environ.pop(k, None)
+            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+        }
         os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
         os.environ["BEE_DEV_MCP_PORT"] = "99999"
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
@@ -3282,12 +3357,17 @@ class ReadOnlyToolsTests(unittest.TestCase):
     def test_non_numeric_port_raises_runtime_error(self) -> None:
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config_nan_port.yml"
-        config_path.write_text("limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
-                               "  max_context_chars: 1\n  max_tree_entries: 1\n"
-                               "  max_search_results: 1\n  max_review_page_chars: 1\n"
-                               "deny_paths: []\nprojects: {}\n", encoding="utf-8")
-        old = {k: os.environ.pop(k, None) for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT",
-                                                     "BEE_MCP_CONFIG")}
+        config_path.write_text(
+            "limits:\n  max_file_bytes: 1\n  max_diff_chars: 1\n"
+            "  max_context_chars: 1\n  max_tree_entries: 1\n"
+            "  max_search_results: 1\n  max_review_page_chars: 1\n"
+            "deny_paths: []\nprojects: {}\n",
+            encoding="utf-8",
+        )
+        old = {
+            k: os.environ.pop(k, None)
+            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+        }
         os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
         os.environ["BEE_DEV_MCP_PORT"] = "not-a-number"
         os.environ["BEE_MCP_CONFIG"] = str(config_path)
@@ -3308,7 +3388,6 @@ class ReadOnlyToolsTests(unittest.TestCase):
                     os.environ.pop(k, None)
 
     def test_default_config_path_points_to_config_projects_yml(self) -> None:
-        import importlib.util
         server_py = ROOT / "server.py"
         source = server_py.read_text(encoding="utf-8")
         self.assertIn('HERE / "config" / "projects.yml"', source)
@@ -3318,19 +3397,19 @@ class ReadOnlyToolsTests(unittest.TestCase):
         repo = self._init_repo("valid_host_port")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
-            '  valid_host_port:\n'
-            '    source: ' + str(repo) + '\n'
-            '    base_branch: main\n'
-            '    context_modes:\n'
-            '      A:\n'
-            '        files: []\n'
+            "  valid_host_port:\n"
+            "    source: " + str(repo) + "\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
         )
         mod = self._import_server(config)
         self.assertEqual(mod.MCP_HOST, "127.0.0.1")
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 8)
+        self.assertEqual(len(tools), 9)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
@@ -3364,9 +3443,11 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
             old_config = os.environ.get("BEE_MCP_CONFIG")
             old_host = os.environ.get("BEE_DEV_MCP_HOST")
             old_port = os.environ.get("BEE_DEV_MCP_PORT")
+            old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
             os.environ["BEE_MCP_CONFIG"] = str(config)
             os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
             os.environ["BEE_DEV_MCP_PORT"] = "8765"
+            os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
             try:
                 spec = importlib.util.spec_from_file_location(
                     "transport_server", ROOT / "server.py"
@@ -3378,10 +3459,14 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 with socket.socket() as sock:
                     sock.bind(("127.0.0.1", 0))
                     port = sock.getsockname()[1]
-                server = uvicorn.Server(uvicorn.Config(
-                    module.mcp.streamable_http_app(), host="127.0.0.1", port=port,
-                    log_level="error",
-                ))
+                server = uvicorn.Server(
+                    uvicorn.Config(
+                        module.mcp.streamable_http_app(),
+                        host="127.0.0.1",
+                        port=port,
+                        log_level="error",
+                    )
+                )
                 thread = threading.Thread(target=server.run, daemon=True)
                 thread.start()
                 deadline = time.monotonic() + 5
@@ -3418,6 +3503,10 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                     os.environ.pop("BEE_DEV_MCP_PORT", None)
                 else:
                     os.environ["BEE_DEV_MCP_PORT"] = old_port
+                if old_token is None:
+                    os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                else:
+                    os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
 
 
 if __name__ == "__main__":

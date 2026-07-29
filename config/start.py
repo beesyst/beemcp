@@ -9,12 +9,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import yaml
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = PROJECT_ROOT / ".env"
@@ -33,6 +31,7 @@ REQUIRED_ENV_VARS = (
     "BEE_DEV_MCP_TUNNEL_ADMIN_ADDR",
     "BEE_DEV_MCP_CONTROL_PLANE_URL",
     "CONTROL_PLANE_API_KEY",
+    "BEE_DEV_MCP_GITHUB_TOKEN",
 )
 PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -50,6 +49,7 @@ class RuntimeSettings:
     tunnel_admin_addr: str
     control_plane_url: str
     api_key: str
+    github_token: str = field(repr=False)
     config_home: Path
 
     @property
@@ -75,6 +75,10 @@ class RuntimeSettings:
     @property
     def tunnel_profile_path(self) -> Path:
         return self.config_home / "tunnel-client" / f"{self.profile}.yaml"
+
+    @property
+    def mcp_env_file(self) -> Path:
+        return self.config_home / "bee-dev-mcp" / "mcp.env"
 
     @property
     def systemd_dir(self) -> Path:
@@ -127,11 +131,7 @@ def read_env() -> dict[str, str]:
 
 def load_settings() -> RuntimeSettings:
     values = read_env()
-    missing = [
-        name
-        for name in REQUIRED_ENV_VARS
-        if not values.get(name)
-    ]
+    missing = [name for name in REQUIRED_ENV_VARS if not values.get(name)]
     if missing:
         raise LifecycleError(
             f"Missing required variables in {ENV_FILE}: {', '.join(missing)}"
@@ -156,6 +156,15 @@ def load_settings() -> RuntimeSettings:
         if any(character in values[name] for character in ("\0", "\n", "\r")):
             raise LifecycleError(f"{name} contains unsupported characters")
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    github_token = values["BEE_DEV_MCP_GITHUB_TOKEN"]
+    if any(
+        character.isspace() or not character.isprintable() for character in github_token
+    ):
+        raise LifecycleError(
+            "BEE_DEV_MCP_GITHUB_TOKEN contains whitespace or control characters"
+        )
+    if len(github_token) < 10:
+        raise LifecycleError("BEE_DEV_MCP_GITHUB_TOKEN length is too short")
     return RuntimeSettings(
         host=values["BEE_DEV_MCP_HOST"],
         port=port,
@@ -164,6 +173,7 @@ def load_settings() -> RuntimeSettings:
         tunnel_admin_addr=values["BEE_DEV_MCP_TUNNEL_ADMIN_ADDR"],
         control_plane_url=values["BEE_DEV_MCP_CONTROL_PLANE_URL"],
         api_key=values["CONTROL_PLANE_API_KEY"],
+        github_token=github_token,
         config_home=config_home,
     )
 
@@ -205,6 +215,11 @@ def generate_tunnel_profile(settings: RuntimeSettings) -> None:
     )
 
 
+def generate_mcp_env_file(settings: RuntimeSettings) -> None:
+    content = f"BEE_DEV_MCP_GITHUB_TOKEN={settings.github_token}\n"
+    atomic_write(settings.mcp_env_file, content, 0o600)
+
+
 def systemd_escape(value: str) -> str:
     return value.replace("%", "%%").replace("\\", "\\\\").replace('"', '\\"')
 
@@ -230,6 +245,7 @@ def sync_runtime(settings: RuntimeSettings) -> None:
         raise LifecycleError(f"Source unit missing: {TUNNEL_TEMPLATE.name}")
     tunnel_client = require_command("tunnel-client")
     generate_tunnel_profile(settings)
+    generate_mcp_env_file(settings)
     render_unit(
         MCP_TEMPLATE,
         settings.systemd_dir / MCP_SERVICE,
@@ -238,6 +254,7 @@ def sync_runtime(settings: RuntimeSettings) -> None:
             "@@VENV_PYTHON@@": str(VENV_PYTHON),
             "@@MCP_HOST@@": settings.host,
             "@@MCP_PORT@@": str(settings.port),
+            "@@MCP_ENV_FILE@@": str(settings.mcp_env_file),
         },
     )
     render_unit(
@@ -267,13 +284,20 @@ def check_active(name: str) -> None:
 
 def wait_ready(settings: RuntimeSettings) -> None:
     for attempt in range(30):
-        if command(
-            [
-                "curl", "--fail", "--silent", "--output", "/dev/null",
-                settings.readyz_url,
-            ],
-            check=False,
-        ).returncode == 0:
+        if (
+            command(
+                [
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--output",
+                    "/dev/null",
+                    settings.readyz_url,
+                ],
+                check=False,
+            ).returncode
+            == 0
+        ):
             return
         if attempt < 29:
             time.sleep(1)
@@ -318,7 +342,7 @@ def reconciliation(settings: RuntimeSettings, success_message: str) -> None:
             "and start a new chat."
         )
         print(success_message)
-    except (LifecycleError, subprocess.CalledProcessError):
+    except LifecycleError, subprocess.CalledProcessError:
         if started:
             service_stop(TUNNEL_SERVICE)
             service_stop(MCP_SERVICE)
@@ -361,8 +385,14 @@ def cmd_status() -> None:
 def cmd_logs(arguments: list[str]) -> None:
     command(
         [
-            "journalctl", "--user", "-u", MCP_SERVICE, "-u", TUNNEL_SERVICE,
-            "-f", *arguments,
+            "journalctl",
+            "--user",
+            "-u",
+            MCP_SERVICE,
+            "-u",
+            TUNNEL_SERVICE,
+            "-f",
+            *arguments,
         ]
     )
 
@@ -386,7 +416,7 @@ def env_permissions_ok() -> tuple[bool, str]:
 def main_profile_url(path: Path) -> str | None:
     try:
         profile = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except OSError, yaml.YAMLError:
         return None
     if not isinstance(profile, dict):
         return None
@@ -438,9 +468,7 @@ def cmd_doctor() -> None:
             if not (settings.systemd_dir / unit).is_file():
                 problems.append(f"installed unit missing: {unit}")
     if available_commands["systemctl"]:
-        if command(
-            ["systemctl", "--user", "show-environment"], check=False
-        ).returncode:
+        if command(["systemctl", "--user", "show-environment"], check=False).returncode:
             problems.append("systemd user manager unavailable")
         for service, label in ((MCP_SERVICE, "MCP"), (TUNNEL_SERVICE, "Tunnel")):
             if command(
@@ -458,15 +486,43 @@ def cmd_doctor() -> None:
         elif profile_url is None:
             problems.append("tunnel profile main MCP URL missing")
         elif profile_url != settings.mcp_url:
-            problems.extend((
-                "Tunnel MCP URL mismatch:",
-                f" configured: {profile_url}",
-                f" expected:   {settings.mcp_url}",
-            ))
+            problems.extend(
+                (
+                    "Tunnel MCP URL mismatch:",
+                    f" configured: {profile_url}",
+                    f" expected:   {settings.mcp_url}",
+                )
+            )
+        if not settings.mcp_env_file.is_file():
+            problems.append(f"MCP env file missing: {settings.mcp_env_file}")
+        else:
+            try:
+                mcp_env_mode = stat.S_IMODE(settings.mcp_env_file.stat().st_mode)
+                if mcp_env_mode & 0o177 or mcp_env_mode & 0o7000:
+                    problems.append(
+                        f"MCP env file permissions {mcp_env_mode:03o} (must be 0600)"
+                    )
+                mcp_env_content = settings.mcp_env_file.read_text(encoding="utf-8")
+                expected_mcp_env_content = (
+                    f"BEE_DEV_MCP_GITHUB_TOKEN={settings.github_token}\n"
+                )
+                if mcp_env_content != expected_mcp_env_content:
+                    problems.append("MCP env file has unexpected content")
+            except OSError:
+                problems.append("MCP env file cannot be read")
+        mcp_unit_path = settings.systemd_dir / MCP_SERVICE
+        if mcp_unit_path.is_file():
+            mcp_unit_text = mcp_unit_path.read_text(encoding="utf-8")
+            if str(settings.mcp_env_file) not in mcp_unit_text:
+                problems.append("MCP unit does not reference the MCP env file")
         if available_commands["curl"]:
             if command(
                 [
-                    "curl", "--fail", "--silent", "--output", "/dev/null",
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--output",
+                    "/dev/null",
                     settings.healthz_url,
                 ],
                 check=False,
@@ -476,7 +532,11 @@ def cmd_doctor() -> None:
                 lines.append("Local MCP health: OK")
             if command(
                 [
-                    "curl", "--fail", "--silent", "--output", "/dev/null",
+                    "curl",
+                    "--fail",
+                    "--silent",
+                    "--output",
+                    "/dev/null",
                     settings.readyz_url,
                 ],
                 check=False,

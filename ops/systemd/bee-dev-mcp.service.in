@@ -8,5 +8,6 @@ WorkingDirectory=@@SCRIPT_DIR@@
 ExecStart="@@VENV_PYTHON@@" "@@SCRIPT_DIR@@/server.py"
 Environment="BEE_DEV_MCP_HOST=@@MCP_HOST@@"
 Environment="BEE_DEV_MCP_PORT=@@MCP_PORT@@"
+EnvironmentFile=@@MCP_ENV_FILE@@
 Restart=on-failure
 RestartSec=3

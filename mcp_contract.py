@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable
 
-
 EXPECTED_TOOLS = (
     "list_projects",
     "list_worktrees",
@@ -13,9 +12,10 @@ EXPECTED_TOOLS = (
     "get_review_bundle",
     "read_project_file",
     "search_project",
+    "get_github_context",
 )
 
-TOOL_CONTRACT_VERSION = 2
+TOOL_CONTRACT_VERSION = 3
 
 
 def tool_contract_fingerprint(tool_names: Iterable[str]) -> str:

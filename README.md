@@ -16,6 +16,7 @@ it reports the full list. Fill only these values in repo-local `.env`:
 
 - `BEE_DEV_MCP_TUNNEL_ID`
 - `CONTROL_PLANE_API_KEY`
+- `BEE_DEV_MCP_GITHUB_TOKEN`
 
 Then run `./start.sh` again. It reconciles the runtime profile and units, applies
 `.env`, starts MCP, verifies its contract, and starts the tunnel. Manual
@@ -31,8 +32,9 @@ Use `./start.sh doctor` after the stack is up.
 |---|---|---|
 | `<repo>/.env` | Runtime, tunnel, and secrets configuration | **Yes** |
 | `<repo>/.env.example` | Public template tracked in Git | No |
-| `<repo>/config/projects.yml` | Project allowlist and local source paths | **Yes** — edit `source` for a different directory layout |
+| `<repo>/config/projects.yml` | Project allowlist, local source paths, and optional `github_repo` | **Yes** — edit `source` for a different directory layout, add `github_repo: owner/repo` for GitHub access |
 | `~/.config/systemd/user/bee-dev-mcp*.service` | Installed systemd units | **No** — auto-generated |
+| `~/.config/bee-dev-mcp/mcp.env` | Generated MCP-only environment file (GitHub token only) | **No** — auto-generated |
 | `~/.config/tunnel-client/*.yaml` | Tunnel profile | **No** — auto-generated |
 
 - `.env` is Git-ignored, permissions `0600`.
@@ -60,7 +62,7 @@ Credentials are **not** copied automatically.
 - No agents — Copilot and Codex are never invoked.
 - No project checks — no tests, linters, or build commands are run.
 - No Git write operations — no commit, push, merge, branch switch, or reset.
-- No GitHub access — no issue, PR, or API calls.
+- Bounded read-only GitHub access — only `get_github_context` for allowlisted repositories; no Issue/PR creation, modification, comments, or any write operations.
 - Only allowlisted projects and their Git worktrees can be accessed.
 
 ## Projects and context modes
@@ -225,12 +227,90 @@ final page always has `truncated=false`.
 Не изменяй проект и не запускай агентов.
 ```
 
+## GitHub context (`get_github_context`)
+
+Bee Dev MCP can read GitHub Issues and Pull Requests from allowlisted
+repositories. This is a **bounded read-only** operation:
+- Only `get_github_context` — no write operations.
+- Only repositories listed in `github_repo` under each project in
+  `config/projects.yml`.
+- Only exact URL formats:
+  `https://github.com/<owner>/<repo>/issues/<number>` or
+  `https://github.com/<owner>/<repo>/pull/<number>`.
+
+### Token setup
+
+1. Create a fine-grained personal access token (PAT) at:
+   https://github.com/settings/tokens?type=beta
+2. Set repository access to the allowlisted repositories.
+3. Set these permissions to **Read-only**:
+   - Metadata: Read-only
+   - Issues: Read-only
+   - Pull requests: Read-only
+4. Copy the token into `<repo>/.env`:
+   ```env
+   BEE_DEV_MCP_GITHUB_TOKEN=github_pat_...
+   ```
+5. Run `./start.sh restart` and `./start.sh doctor`.
+
+### Repository allowlist
+
+Each project in `config/projects.yml` can declare an optional `github_repo`:
+
+```yaml
+projects:
+  beeui:
+    source: ../../beeui
+    github_repo: beesyst/beeui
+    base_branch: main
+```
+
+Only repositories with `github_repo` are accessible.
+
+### Example usage in ChatGPT
+
+The `FULL_APPROVED_ISSUE` and `CURRENT_PR_OR_NONE` fields accept GitHub URLs
+directly:
+
+```text
+FULL_APPROVED_ISSUE:
+
+https://github.com/beesyst/beeui/issues/97
+
+CURRENT_PR_OR_NONE:
+
+https://github.com/beesyst/beeui/pull/95
+```
+
+ChatGPT calls `get_github_context` with the URL and receives:
+
+- **Issue**: title, body, state, author, labels, paginated comments, metadata.
+- **PR**: title, body, state, draft/merged flags, author, base/head refs,
+  paginated conversation comments, submitted reviews, and inline review comments.
+
+### Response size limit
+
+The response respects `limits.max_context_chars`. The main Issue/PR body is
+never silently truncated. If the body alone exceeds the limit, the call fails
+with an error. Comments, reviews, and inline review comments may be omitted
+when the budget is exhausted, with corresponding `*_truncated` flags set.
+
+### Safe token passing
+
+The GitHub token is read from the repo-local `.env` and written into a
+separate generated file at `~/.config/bee-dev-mcp/mcp.env` with permissions
+`0600`. This file contains only `BEE_DEV_MCP_GITHUB_TOKEN` and is used by the
+MCP systemd unit via `EnvironmentFile=`. The tunnel service continues to use
+the full repo-local `.env`. Other secrets (`CONTROL_PLANE_API_KEY`, tunnel ID)
+are never exposed to the MCP process.
+
 ## How to add a new project
 
 1. Add an entry to `config/projects.yml` under `projects:` with `source`,
    `base_branch`, and `context_modes`.
-2. Define A/B/C modes and optionally `related` projects.
-3. Verify with `./start.sh restart` and check `/healthz`.
+2. Optionally add `github_repo: owner/repo` for GitHub context access.
+3. Define A/B/C modes and optionally `related` projects.
+4. Verify with `./start.sh restart` and check `/healthz`.
 
 ## How to check the stack
 
@@ -275,19 +355,21 @@ it cannot verify the remote ChatGPT snapshot.
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains eight tools
+2. `./start.sh doctor` — confirm local tools/list contains nine tools
 3. Open the Bee Dev MCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
-7. Verify that `get_review_manifest` and `get_review_bundle_page` are available
+7. Verify that `get_review_manifest`, `get_review_bundle_page`, and
+   `get_github_context` are available
 
 Important:
 
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with only six tools is insufficient for a complete review.
+- A schema with only eight tools is insufficient after the GitHub context
+  addition.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual
@@ -311,11 +393,14 @@ cd /home/bee/Pro/bee-dev-mcp
 ```
 
 `setup` verifies required programs and `.env`, runs `uv sync --frozen`,
-generates the tunnel-client profile (from `.env` values), renders systemd
-units from portable `ops/systemd/*.service.in` templates, installs them, and
-reloads the user manager.
+generates the tunnel-client profile (from `.env` values), generates a separate
+MCP environment file at `~/.config/bee-dev-mcp/mcp.env` containing only
+`BEE_DEV_MCP_GITHUB_TOKEN`, renders systemd units from portable
+`ops/systemd/*.service.in` templates, installs them, and reloads the user
+manager.
 
 The API key (`CONTROL_PLANE_API_KEY`) is never written into the tunnel profile
 (YAML uses `env:CONTROL_PLANE_API_KEY`), and never passed to the Python MCP
-server process (only host/port are set as Environment= directives in the MCP
-unit). The tunnel unit reads the full `.env` via `EnvironmentFile=`.
+server process (only host/port are set as Environment= directives and the
+isolated `mcp.env` file). The tunnel unit reads the full `.env` via
+`EnvironmentFile=`.

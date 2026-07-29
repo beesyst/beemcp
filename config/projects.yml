@@ -30,6 +30,7 @@ projects:
   bee-dev-mcp:
     source: ..
     base_branch: main
+    github_repo: beesyst/bee-dev-mcp
     context_modes:
       A:
         files:
@@ -55,6 +56,7 @@ projects:
   beeagent:
     source: ../../beeagent
     base_branch: main
+    github_repo: beesyst/beeagent
     context_modes:
       A:
         files:
@@ -90,6 +92,7 @@ projects:
   beeagent-rop:
     source: ../../beeagent-rop
     base_branch: main
+    github_repo: beesyst/beeagent-rop
     context_modes:
       A:
         files:
@@ -119,6 +122,7 @@ projects:
   beeui:
     source: ../../beeui
     base_branch: main
+    github_repo: beesyst/beeui
     context_modes:
       A:
         files:
