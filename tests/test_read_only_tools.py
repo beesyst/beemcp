@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib.util
+import json
 import os
 import subprocess
 import tempfile
@@ -2164,6 +2166,151 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIsNone(page["next_cursor"])
         self.assertFalse(page["truncated"])
 
+    def test_review_bundle_page_full_cursor_chain_across_all_segments(self) -> None:
+        repo = self._init_repo("pag_all_segments")
+        self._commit_file(repo, "base.txt", "base\n")
+        _run_git(["git", "checkout", "-b", "feature"], repo)
+        committed = "COMMITTED_TOKEN\n" + ("committed data " * 20 + "\n") * 12
+        self._commit_file(repo, "committed_big.txt", committed)
+        (repo / "staged.txt").write_text(
+            "STAGED_TOKEN\n" + "staged data " * 30,
+            encoding="utf-8",
+        )
+        _run_git(["git", "add", "staged.txt"], repo)
+        (repo / "base.txt").write_text(
+            "UNSTAGED_TOKEN\n" + "unstaged data " * 30,
+            encoding="utf-8",
+        )
+        (repo / "untracked.txt").write_text(
+            "UNTRACKED_TOKEN\n" + "untracked data " * 30,
+            encoding="utf-8",
+        )
+        config = (
+            "limits:\n"
+            "  max_file_bytes: 10000000\n"
+            "  max_diff_chars: 1000\n"
+            "  max_context_chars: 160000\n"
+            "  max_tree_entries: 4000\n"
+            "  max_search_results: 200\n"
+            "  max_review_page_chars: 120\n"
+            "deny_paths: []\n"
+            "projects:\n"
+            f"  pag_all_segments:\n    source: {repo}\n    base_branch: main\n"
+            "    context_modes:\n      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+
+        cursor = ""
+        full_content: list[str] = []
+        resume_segments: list[str] = []
+        while True:
+            page = mod.get_review_bundle_page(
+                target="pag_all_segments", mode="A", cursor=cursor
+            )
+            self.assertEqual(page["cursor"], cursor)
+            full_content.append(page["content"])
+            if not page["has_more"]:
+                self.assertIsNone(page["next_cursor"])
+                break
+            cursor = page["next_cursor"]
+            self.assertIsNotNone(cursor)
+            self.assertNotIn("=", cursor)
+            resume_segments.append(
+                mod._decode_diff_cursor(
+                    cursor, "pag_all_segments", "A", page["snapshot_id"]
+                )["segment"]
+            )
+
+        combined = "".join(full_content)
+        inventory = mod._git_inventory("pag_all_segments", "A")
+        expected = "".join(chunk for _, chunk in mod._stream_diff_segments(inventory))
+        self.assertEqual(combined, expected)
+        for marker in (
+            "COMMITTED_TOKEN",
+            "STAGED_TOKEN",
+            "UNSTAGED_TOKEN",
+            "UNTRACKED_TOKEN",
+        ):
+            self.assertIn(marker, combined)
+
+        transitions: list[str] = []
+        for segment in resume_segments:
+            if not transitions or transitions[-1] != segment:
+                transitions.append(segment)
+        self.assertEqual(transitions[:3], ["committed", "staged", "unstaged"])
+        self.assertIn("untracked:0", transitions)
+        self.assertLess(transitions.index("unstaged"), transitions.index("untracked:0"))
+
+    def test_cursor_decoder_accepts_legacy_padding_and_reports_stages(self) -> None:
+        repo = self._init_repo("pag_cursor_stages")
+        self._commit_file(repo, "base.txt", "base")
+        config = self._make_project_yml(
+            "  pag_cursor_stages:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n"
+            "        files: []\n"
+        )
+        mod = self._import_server(config)
+        base_payload = {
+            "kind": "diff",
+            "target": "pag_cursor_stages",
+            "mode": "A",
+            "snapshot_id": "snapshot",
+            "page": 1,
+            "segment": "committed",
+            "offset": 0,
+        }
+
+        def encode(payload: dict[str, object]) -> str:
+            return base64.urlsafe_b64encode(
+                json.dumps(payload, sort_keys=True).encode("utf-8")
+            ).decode("ascii")
+
+        for padding in ("=", "=="):
+            for length in range(4):
+                candidate = encode({**base_payload, "legacy": "x" * length})
+                if candidate.endswith(padding) and not (
+                    padding == "=" and candidate.endswith("==")
+                ):
+                    with self.subTest(padding=padding):
+                        unpadded = candidate.rstrip("=")
+                        self.assertEqual(
+                            mod._decode_diff_cursor(
+                                candidate,
+                                "pag_cursor_stages",
+                                "A",
+                                "snapshot",
+                            ),
+                            mod._decode_diff_cursor(
+                                unpadded,
+                                "pag_cursor_stages",
+                                "A",
+                                "snapshot",
+                            ),
+                        )
+                    break
+            else:
+                self.fail(f"could not construct cursor ending in {padding!r}")
+
+        def assert_stage(cursor: str, expected_stage: str) -> None:
+            with self.assertRaises(mod.CursorError) as raised:
+                mod._decode_diff_cursor(cursor, "pag_cursor_stages", "A", "snapshot")
+            self.assertEqual(raised.exception.stage, expected_stage)
+
+        assert_stage("not-valid-base64!!!", "invalid_base64")
+        assert_stage(base64.urlsafe_b64encode(b"\xff").decode(), "invalid_utf8")
+        assert_stage(base64.urlsafe_b64encode(b"[").decode(), "invalid_json")
+        assert_stage(base64.urlsafe_b64encode(b"[]").decode(), "invalid_structure")
+        assert_stage(encode({**base_payload, "kind": "manifest"}), "wrong_kind")
+        assert_stage(encode({**base_payload, "target": "other"}), "wrong_target")
+        assert_stage(encode({**base_payload, "mode": "B"}), "wrong_mode")
+        assert_stage(encode({**base_payload, "snapshot_id": "old"}), "stale_snapshot")
+        assert_stage(encode({**base_payload, "segment": "unknown"}), "invalid_segment")
+        assert_stage(encode({**base_payload, "offset": -1}), "invalid_offset")
+        assert_stage(encode({**base_payload, "page": -1}), "invalid_page")
+
     def test_diff_page_stops_stream_after_page_is_full(self) -> None:
         repo = self._init_repo("stream_page")
         self._commit_file(repo, "base.txt", "base")
@@ -3413,6 +3560,189 @@ class ReadOnlyToolsTests(unittest.TestCase):
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
+    def test_review_cursor_round_trip_uses_streamable_http_transport(self) -> None:
+        import socket
+
+        import uvicorn
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        if TMP_ROOT is None:
+            self.skipTest("no writable temporary storage")
+        server: uvicorn.Server | None = None
+        thread: threading.Thread | None = None
+        with tempfile.TemporaryDirectory(dir=TMP_ROOT) as temp:
+            root = Path(temp)
+            repo = root / "review-repo"
+            repo.mkdir()
+            _run_git(["git", "init", "-b", "main"], repo)
+            _run_git(["git", "config", "user.email", "test@test"], repo)
+            _run_git(["git", "config", "user.name", "Test"], repo)
+            (repo / "base.txt").write_text("base\n", encoding="utf-8")
+            _run_git(["git", "add", "base.txt"], repo)
+            _run_git(["git", "commit", "-m", "base"], repo)
+            _run_git(["git", "checkout", "-b", "feature"], repo)
+            (repo / "large.txt").write_text(
+                "TRANSPORT_CURSOR_TOKEN\n" + ("x" * 80 + "\n") * 20,
+                encoding="utf-8",
+            )
+            _run_git(["git", "add", "large.txt"], repo)
+            _run_git(["git", "commit", "-m", "large diff"], repo)
+            config = root / "projects.yml"
+            config.write_text(
+                "limits:\n"
+                "  max_file_bytes: 200000\n"
+                "  max_diff_chars: 120000\n"
+                "  max_context_chars: 160000\n"
+                "  max_tree_entries: 4000\n"
+                "  max_search_results: 200\n"
+                "  max_review_page_chars: 100\n"
+                "deny_paths: []\n"
+                "projects:\n"
+                f"  transport-proj:\n    source: {repo}\n    base_branch: main\n"
+                "    context_modes:\n      A:\n        files: []\n",
+                encoding="utf-8",
+            )
+            old_config = os.environ.get("BEE_MCP_CONFIG")
+            old_host = os.environ.get("BEE_DEV_MCP_HOST")
+            old_port = os.environ.get("BEE_DEV_MCP_PORT")
+            old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
+            os.environ["BEE_MCP_CONFIG"] = str(config)
+            os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
+            os.environ["BEE_DEV_MCP_PORT"] = "8765"
+            os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    "transport_cursor_server", ROOT / "server.py"
+                )
+                if spec is None or spec.loader is None:
+                    raise AssertionError("Cannot load server.py")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                with socket.socket() as sock:
+                    sock.bind(("127.0.0.1", 0))
+                    port = sock.getsockname()[1]
+                server = uvicorn.Server(
+                    uvicorn.Config(
+                        module.mcp.streamable_http_app(),
+                        host="127.0.0.1",
+                        port=port,
+                        log_level="error",
+                    )
+                )
+                thread = threading.Thread(target=server.run, daemon=True)
+                thread.start()
+                deadline = time.monotonic() + 5
+                while not server.started and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(server.started)
+
+                async def call_pages() -> tuple[
+                    dict[str, object], dict[str, object], str, dict[str, object]
+                ]:
+                    async with streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp"
+                    ) as streams:
+                        read_stream, write_stream, _ = streams
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            first = await session.call_tool(
+                                "get_review_bundle_page",
+                                arguments={
+                                    "target": "transport-proj",
+                                    "mode": "A",
+                                    "cursor": "",
+                                },
+                            )
+                            first_data = dict(first.structuredContent or {})
+                            cursor = first_data["next_cursor"]
+                            self.assertIsInstance(cursor, str)
+                            second = await session.call_tool(
+                                "get_review_bundle_page",
+                                arguments={
+                                    "target": "transport-proj",
+                                    "mode": "A",
+                                    "cursor": cursor,
+                                },
+                            )
+                            decoded = module._decode_diff_cursor(
+                                cursor,
+                                "transport-proj",
+                                "A",
+                                first_data["snapshot_id"],
+                            )
+                            for length in range(4):
+                                legacy_cursor = base64.urlsafe_b64encode(
+                                    json.dumps(
+                                        {
+                                            "kind": "diff",
+                                            "target": "transport-proj",
+                                            "mode": "A",
+                                            "snapshot_id": first_data["snapshot_id"],
+                                            **decoded,
+                                            "legacy": "x" * length,
+                                        },
+                                        sort_keys=True,
+                                    ).encode("utf-8")
+                                ).decode("ascii")
+                                if legacy_cursor.endswith(
+                                    "="
+                                ) and not legacy_cursor.endswith("=="):
+                                    break
+                            else:
+                                raise AssertionError("could not create padded cursor")
+                            legacy = await session.call_tool(
+                                "get_review_bundle_page",
+                                arguments={
+                                    "target": "transport-proj",
+                                    "mode": "A",
+                                    "cursor": legacy_cursor,
+                                },
+                            )
+                            return (
+                                first_data,
+                                dict(second.structuredContent or {}),
+                                legacy_cursor,
+                                dict(legacy.structuredContent or {}),
+                            )
+
+                first, second, legacy_cursor, legacy = asyncio.run(call_pages())
+                self.assertTrue(first["has_more"])
+                next_cursor = first["next_cursor"]
+                self.assertIsInstance(next_cursor, str)
+                assert isinstance(next_cursor, str)
+                self.assertNotIn("=", next_cursor)
+                self.assertEqual(second["cursor"], first["next_cursor"])
+                self.assertEqual(second["page_number"], 1)
+                self.assertTrue(legacy_cursor.endswith("="))
+                self.assertEqual(legacy["cursor"], legacy_cursor)
+                self.assertEqual(legacy["page_number"], 1)
+                self.assertIn(
+                    "TRANSPORT_CURSOR_TOKEN",
+                    str(first["content"]) + str(second["content"]),
+                )
+            finally:
+                if server is not None:
+                    server.should_exit = True
+                if thread is not None:
+                    thread.join(timeout=5)
+                if old_config is None:
+                    os.environ.pop("BEE_MCP_CONFIG", None)
+                else:
+                    os.environ["BEE_MCP_CONFIG"] = old_config
+                if old_host is None:
+                    os.environ.pop("BEE_DEV_MCP_HOST", None)
+                else:
+                    os.environ["BEE_DEV_MCP_HOST"] = old_host
+                if old_port is None:
+                    os.environ.pop("BEE_DEV_MCP_PORT", None)
+                else:
+                    os.environ["BEE_DEV_MCP_PORT"] = old_port
+                if old_token is None:
+                    os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                else:
+                    os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
+
     def test_live_tools_list_uses_streamable_http_lifecycle(self) -> None:
         import socket
 

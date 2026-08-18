@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import codecs
 import fnmatch
 import hashlib
@@ -1477,9 +1478,9 @@ def _build_review_diff_page(
     if page_size <= 0:
         raise ValueError(f"page_size must be positive, got {page_size}")
     if start_offset < 0:
-        raise ValueError(f"Invalid offset: {start_offset}")
+        raise CursorError("invalid_offset", "Invalid offset in cursor")
     if start_segment == "" and start_offset:
-        raise ValueError("Initial diff cursor must have offset 0")
+        raise CursorError("invalid_offset", "Invalid offset in cursor")
 
     parts: list[str] = []
     total = 0
@@ -1496,7 +1497,7 @@ def _build_review_diff_page(
                     and current_segment == start_segment
                 ):
                     if start_offset > segment_offset:
-                        raise ValueError(f"Offset outside segment: {start_offset}")
+                        raise CursorError("invalid_offset", "Invalid offset in cursor")
                     found_start = True
                 current_segment = segment
                 segment_offset = 0
@@ -1526,7 +1527,7 @@ def _build_review_diff_page(
             segment_offset += len(chunk)
 
         if not found_start:
-            raise ValueError(f"Unknown segment: {start_segment}")
+            raise CursorError("invalid_segment", "Invalid segment in cursor")
         return "".join(parts), "", 0, False
     finally:
         stream.close()
@@ -1804,61 +1805,103 @@ def _encode_cursor(
         "page": page,
     }
     data.update(extra)
-    return base64.urlsafe_b64encode(json.dumps(data, sort_keys=True).encode()).decode()
+    # RFC 4648 base64url padding is optional.  Omit it so opaque cursors are
+    # stable across transports which normalize trailing '=' characters.
+    return (
+        base64.urlsafe_b64encode(json.dumps(data, sort_keys=True).encode())
+        .decode()
+        .rstrip("=")
+    )
+
+
+class CursorError(ValueError):
+    """A bounded cursor error with a machine-testable validation stage."""
+
+    def __init__(self, stage: str, message: str) -> None:
+        super().__init__(message)
+        self.stage = stage
+
+
+def _decode_cursor_payload(cursor: str) -> Any:
+    """Strictly decode a padded or unpadded base64url JSON cursor."""
+    if not isinstance(cursor, str):
+        raise CursorError("invalid_structure", "Malformed cursor")
+    try:
+        encoded = cursor.encode("ascii")
+    except UnicodeEncodeError as error:
+        raise CursorError("invalid_base64", "Malformed cursor") from error
+
+    try:
+        raw = base64.b64decode(
+            encoded + b"=" * (-len(encoded) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+    except binascii.Error as error:
+        raise CursorError("invalid_base64", "Malformed cursor") from error
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise CursorError("invalid_utf8", "Malformed cursor") from error
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as error:
+        raise CursorError("invalid_json", "Malformed cursor") from error
 
 
 def _validate_cursor_base(
     decoded: dict[str, Any], kind: str, target: str, mode: str, snapshot_id: str
 ) -> None:
     if not isinstance(decoded, dict):
-        raise ValueError("Malformed cursor")
+        raise CursorError("invalid_structure", "Malformed cursor")
     if decoded.get("kind") != kind:
-        raise ValueError(
-            f"Cursor kind {decoded.get('kind')!r} does not match expected {kind!r}"
+        raise CursorError(
+            "wrong_kind",
+            f"Cursor kind {decoded.get('kind')!r} does not match expected {kind!r}",
         )
     if decoded.get("target") != target:
-        raise ValueError(
-            f"Cursor target {decoded.get('target')!r} does not match {target!r}"
+        raise CursorError(
+            "wrong_target",
+            f"Cursor target {decoded.get('target')!r} does not match {target!r}",
         )
     if decoded.get("mode") != mode:
-        raise ValueError(f"Cursor mode {decoded.get('mode')!r} does not match {mode!r}")
+        raise CursorError(
+            "wrong_mode",
+            f"Cursor mode {decoded.get('mode')!r} does not match {mode!r}",
+        )
     if decoded.get("snapshot_id") != snapshot_id:
-        raise ValueError("Cursor snapshot is stale: worktree has changed")
+        raise CursorError(
+            "stale_snapshot", "Cursor snapshot is stale: worktree has changed"
+        )
 
 
 def _decode_manifest_cursor(
     cursor: str, target: str, mode: str, snapshot_id: str
 ) -> int:
-    try:
-        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except ValueError, OSError:
-        raise ValueError(f"Malformed cursor: {cursor!r}")
+    decoded = _decode_cursor_payload(cursor)
     _validate_cursor_base(decoded, "manifest", target, mode, snapshot_id)
     page = decoded.get("page", 0)
-    if not isinstance(page, int) or page < 0:
-        raise ValueError(f"Invalid page in cursor: {page!r}")
+    if type(page) is not int or page < 0:
+        raise CursorError("invalid_page", "Invalid page in cursor")
     return page
 
 
 def _decode_diff_cursor(
     cursor: str, target: str, mode: str, snapshot_id: str
 ) -> dict[str, Any]:
-    try:
-        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
-    except ValueError, OSError:
-        raise ValueError(f"Malformed cursor: {cursor!r}")
+    decoded = _decode_cursor_payload(cursor)
     _validate_cursor_base(decoded, "diff", target, mode, snapshot_id)
     segment = decoded.get("segment", "")
     offset = decoded.get("offset", 0)
     page = decoded.get("page", 0)
     if not isinstance(segment, str):
-        raise ValueError(f"Invalid segment in cursor: {segment!r}")
-    if not segment:
-        raise ValueError("Diff continuation cursor must include a segment")
-    if not isinstance(offset, int) or offset < 0:
-        raise ValueError(f"Invalid offset in cursor: {offset!r}")
-    if not isinstance(page, int) or page < 0:
-        raise ValueError(f"Invalid page in cursor: {page!r}")
+        raise CursorError("invalid_segment", "Invalid segment in cursor")
+    if re.fullmatch(r"(?:committed|staged|unstaged|untracked:[0-9]+)", segment) is None:
+        raise CursorError("invalid_segment", "Invalid segment in cursor")
+    if type(offset) is not int or offset < 0:
+        raise CursorError("invalid_offset", "Invalid offset in cursor")
+    if type(page) is not int or page < 0:
+        raise CursorError("invalid_page", "Invalid page in cursor")
     return {"segment": segment, "offset": offset, "page": page}
 
 

@@ -28,14 +28,14 @@ Use `./start.sh doctor` after the stack is up.
 
 ### Configuration ownership
 
-| File | Purpose | Edited by user? |
-|---|---|---|
-| `<repo>/.env` | Runtime, tunnel, and secrets configuration | **Yes** |
-| `<repo>/.env.example` | Public template tracked in Git | No |
-| `<repo>/config/projects.yml` | Project allowlist, local source paths, and optional `github_repo` | **Yes** — edit `source` for a different directory layout, add `github_repo: owner/repo` for GitHub access |
-| `~/.config/systemd/user/bee-dev-mcp*.service` | Installed systemd units | **No** — auto-generated |
-| `~/.config/bee-dev-mcp/mcp.env` | Generated MCP-only environment file (GitHub token only) | **No** — auto-generated |
-| `~/.config/tunnel-client/*.yaml` | Tunnel profile | **No** — auto-generated |
+| File                                          | Purpose                                                           | Edited by user?                                                                                           |
+| --------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `<repo>/.env`                                 | Runtime, tunnel, and secrets configuration                        | **Yes**                                                                                                   |
+| `<repo>/.env.example`                         | Public template tracked in Git                                    | No                                                                                                        |
+| `<repo>/config/projects.yml`                  | Project allowlist, local source paths, and optional `github_repo` | **Yes** — edit `source` for a different directory layout, add `github_repo: owner/repo` for GitHub access |
+| `~/.config/systemd/user/bee-dev-mcp*.service` | Installed systemd units                                           | **No** — auto-generated                                                                                   |
+| `~/.config/bee-dev-mcp/mcp.env`               | Generated MCP-only environment file (GitHub token only)           | **No** — auto-generated                                                                                   |
+| `~/.config/tunnel-client/*.yaml`              | Tunnel profile                                                    | **No** — auto-generated                                                                                   |
 
 - `.env` is Git-ignored, permissions `0600`.
 - Project source paths are resolved relative to `config/projects.yml`; unavailable projects are checked when accessed.
@@ -120,19 +120,22 @@ Use the paginated protocol for all reviews:
 
 ### Tool distinction
 
-| Tool | Purpose |
-|------|---------|
-| `get_project_context` | Project/process context (configured files) |
-| `get_review_manifest` | Paginated Git inventory (concatenate content, parse JSON) |
-| `get_review_bundle_page` | Paginated safe diff (cursor protocol) |
-| `read_project_file` | Per-file content (chunked) |
+| Tool                     | Purpose                                                   |
+| ------------------------ | --------------------------------------------------------- |
+| `get_project_context`    | Project/process context (configured files)                |
+| `get_review_manifest`    | Paginated Git inventory (concatenate content, parse JSON) |
+| `get_review_bundle_page` | Paginated safe diff (cursor protocol)                     |
+| `read_project_file`      | Per-file content (chunked)                                |
 
 ### Cursor / snapshot behavior
 
-- Cursor is opaque to the client (base64-encoded JSON)
+- Cursor is opaque to the client (canonical unpadded base64url-encoded JSON;
+  the server also accepts legacy padded base64url cursors)
 - Contains `kind` (either `"manifest"` or `"diff"`), `target`, `mode`, `snapshot_id`, `page`
 - Diff cursors also contain `segment` and `offset` for page-accurate streaming
-- Malformed cursor → ValueError
+- Malformed cursor → ValueError (the public error is bounded; decoder and
+  validation stages distinguish base64, UTF-8/JSON, structure, identity,
+  snapshot, segment, offset, and page failures internally)
 - Cursor kind mismatch → ValueError
 - Cursor from another target → ValueError
 - Cursor from another mode → ValueError
@@ -160,6 +163,7 @@ the entire diff:
 ### get_project_context metadata
 
 `get_project_context` now returns additional fields:
+
 - `path` — absolute path to the target root
 - `branch` — current branch name
 - `head` — current HEAD commit hash
@@ -174,6 +178,7 @@ Main and linked worktrees have the same response contract.
 ### Manifest pagination
 
 `get_review_manifest` returns a paginated JSON string in `content`:
+
 1. Call `get_review_manifest(target, mode, cursor="")`
 2. Read page 0 content, concatenate partial JSON
 3. Repeat with `next_cursor` until `has_more=false`
@@ -184,6 +189,7 @@ Manifest pagination uses the same `max_review_page_chars` boundary.
 ### Backward compatibility
 
 `get_review_bundle` still exists but returns:
+
 - A bounded diff limited by `max_diff_chars`
 - `protocol: "bounded"`, `next_cursor: null`, and no continuation cursor
 - No manifest or manifest fields
@@ -231,6 +237,7 @@ final page always has `truncated=false`.
 
 Bee Dev MCP can read GitHub Issues and Pull Requests from allowlisted
 repositories. This is a **bounded read-only** operation:
+
 - Only `get_github_context` — no write operations.
 - Only repositories listed in `github_repo` under each project in
   `config/projects.yml`.
@@ -340,11 +347,11 @@ shows an old schema, refresh or reconnect the Bee Dev MCP app/connector.
 
 ## Health endpoints
 
-| Path         | Status | Body  |
-|--------------|--------|-------|
-| `/healthz`   | 200    | `live`  |
-| `/readyz`    | 200    | `ready` |
-| `/versionz`  | 200    | service identity JSON |
+| Path        | Status | Body                  |
+| ----------- | ------ | --------------------- |
+| `/healthz`  | 200    | `live`                |
+| `/readyz`   | 200    | `ready`               |
+| `/versionz` | 200    | service identity JSON |
 
 ## Tool schema changed but ChatGPT still shows old tools
 
@@ -374,16 +381,16 @@ Important:
   schema.
 - The server cannot automatically update the ChatGPT connector — manual
   app Refresh is required after every tool schema change.
-| `/readyz`  | 200    | `ready` |
+  | `/readyz` | 200 | `ready` |
 
 ## Systemd workflow
 
 The stack runs as two systemd --user services:
 
-| Service                    | Purpose                |
-|----------------------------|------------------------|
-| `bee-dev-mcp.service`      | FastMCP / MCP server   |
-| `bee-dev-mcp-tunnel.service` | Tunnel / proxy      |
+| Service                      | Purpose              |
+| ---------------------------- | -------------------- |
+| `bee-dev-mcp.service`        | FastMCP / MCP server |
+| `bee-dev-mcp-tunnel.service` | Tunnel / proxy       |
 
 ### Initial setup
 
