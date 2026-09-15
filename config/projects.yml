@@ -4,7 +4,7 @@ limits:
   max_context_chars: 160000
   max_tree_entries: 4000
   max_search_results: 200
-  max_review_page_chars: 30000
+  max_review_page_chars: 60000
 
 deny_paths:
   - ".env"
@@ -52,6 +52,43 @@ projects:
         tree_roots:
           - ops
           - tests
+
+  beesdk:
+    source: ../../beesdk
+    base_branch: main
+    github_repo: beesyst/beesdk
+    context_modes:
+      A:
+        files:
+          - README.ru.md
+          - AGENTS.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/SPEC.md
+          - .github/ISSUE_TEMPLATE/issue.md
+          - .github/PULL_REQUEST_TEMPLATE/pr.md
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - CHANGELOG.md
+          - docs/ARCHITECTURE.md
+          - docs/DEV_GUIDE.md
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+          - docs
+          - .agents
+    related:
+      - project: beeagent
+        files:
+          - docs/ROADMAP.md
+      - project: beeagent-rop
+        files:
+          - docs/ROADMAP.md
 
   beeagent:
     source: ../../beeagent
@@ -118,6 +155,56 @@ projects:
       - project: beeagent
         files:
           - docs/ROADMAP.md
+
+  beedrill:
+    source: ../../beedrill
+    base_branch: main
+    github_repo: beesyst/beedrill
+    context_modes:
+      A:
+        files:
+          - README.ru.md
+          - AGENTS.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/SPEC.md
+          - .github/ISSUE_TEMPLATE/issue.md
+          - .github/PULL_REQUEST_TEMPLATE/pr.md
+
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - docs/ARCHITECTURE.md
+          - docs/DEV_GUIDE.md
+
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+          - docs
+          - .agents
+
+    related:
+      - project: beesdk
+        files:
+          - docs/ROADMAP.md
+          - docs/ARCHITECTURE.md
+          - docs/SPEC.md
+          - src/beesdk/__init__.py
+          - src/beesdk/modules.py
+          - src/beesdk/artifacts.py
+          - src/beesdk/capabilities.py
+
+      - project: beeagent
+        files:
+          - docs/ROADMAP.md
+          - docs/DEV_GUIDE.md
+          - src/beeagent_module/core/module_contract.py
+          - src/beeagent_module/core/module_runtime.py
+          - src/beeagent_module/core/module_registry.py
 
   beeui:
     source: ../../beeui
