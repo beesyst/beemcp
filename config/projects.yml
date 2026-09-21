@@ -24,7 +24,6 @@ deny_paths:
   - "**/__pycache__/**"
   - ".venv/**"
   - "**/.venv/**"
-  - ".github/workflows/**"
 
 projects:
   bee-dev-mcp:
@@ -238,3 +237,56 @@ projects:
           - config
           - docs
           - tests
+
+  beejsp:
+    source: ../../beejsp
+    base_branch: main
+    github_repo: beesyst/beejsp
+
+    context_modes:
+      A:
+        files:
+          - README.md
+          - AGENTS.md
+          - docs/ROADMAP.md
+          - docs/SECURITY.md
+          - docs/FORMALIZATION.md
+          - docs/SUBMISSION.md
+          - .github/ISSUE_TEMPLATE/issue.md
+          - .github/PULL_REQUEST_TEMPLATE/pr.md
+
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - CHANGELOG.md
+          - docs/ARCHITECTURE.md
+          - docs/DEV_GUIDE.md
+          - scripts/sync_jsp_docs.sh
+          - .github/workflows/ci.yml
+          - .github/workflows/sync-jsp-docs.yml
+          - .github/workflows/release-please.yml
+          - .github/release-please/config.json
+          - .github/release-please/manifest.json
+          - docs/vendor/jsp/README.md
+          - docs/vendor/jsp/UPSTREAM_REF
+          - docs/vendor/jsp/UPSTREAM_COMMIT
+          - docs/vendor/jsp/CONTRIBUTING.md
+          - docs/vendor/jsp/docs/award-process.md
+          - docs/vendor/jsp/docs/attribution.md
+          - docs/vendor/jsp/docs/grading.md
+          - docs/vendor/jsp/docs/records.md
+          - docs/vendor/jsp/docs/verification.md
+          - docs/vendor/jsp/problems/README.md
+          - docs/vendor/jsp/skills/lean-verify/SKILL.md
+          - docs/vendor/jsp/.github/ISSUE_TEMPLATE/claim-award.yml
+
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+          - proofs
+          - scripts
+          - docs
+          - .agents

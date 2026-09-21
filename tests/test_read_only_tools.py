@@ -98,7 +98,6 @@ class ReadOnlyToolsTests(unittest.TestCase):
             '  - "**/__pycache__/**"\n'
             '  - ".venv/**"\n'
             '  - "**/.venv/**"\n'
-            '  - ".github/workflows/**"\n'
             "projects:\n" + projects_config
         )
 
