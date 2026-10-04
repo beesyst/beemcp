@@ -1,12 +1,12 @@
-# Bee Dev Read-Only Review
+# BeeMCP Read-Only Review
 
 ChatGPT read-only architecture and code review gateway through MCP.
 
 ## Quick start
 
 ```bash
-git clone <repo-url> bee-dev-mcp
-cd bee-dev-mcp
+git clone <repo-url> beemcp
+cd beemcp
 ./start.sh
 ```
 
@@ -14,9 +14,9 @@ The first run creates `.env` from `.env.example`, sets mode `0600`, syncs
 dependencies, and validates the configuration. If required values are empty,
 it reports the full list. Fill only these values in repo-local `.env`:
 
-- `BEE_DEV_MCP_TUNNEL_ID`
+- `BEEMCP_TUNNEL_ID`
 - `CONTROL_PLANE_API_KEY`
-- `BEE_DEV_MCP_GITHUB_TOKEN`
+- `BEEMCP_GITHUB_TOKEN`
 
 Then run `./start.sh` again. It reconciles the runtime profile and units, applies
 `.env`, starts MCP, verifies its contract, and starts the tunnel. Manual
@@ -28,33 +28,19 @@ Use `./start.sh doctor` after the stack is up.
 
 ### Configuration ownership
 
-| File                                          | Purpose                                                           | Edited by user?                                                                                           |
-| --------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `<repo>/.env`                                 | Runtime, tunnel, and secrets configuration                        | **Yes**                                                                                                   |
-| `<repo>/.env.example`                         | Public template tracked in Git                                    | No                                                                                                        |
-| `<repo>/config/projects.yml`                  | Project allowlist, local source paths, and optional `github_repo` | **Yes** — edit `source` for a different directory layout, add `github_repo: owner/repo` for GitHub access |
-| `~/.config/systemd/user/bee-dev-mcp*.service` | Installed systemd units                                           | **No** — auto-generated                                                                                   |
-| `~/.config/bee-dev-mcp/mcp.env`               | Generated MCP-only environment file (GitHub token only)           | **No** — auto-generated                                                                                   |
-| `~/.config/tunnel-client/*.yaml`              | Tunnel profile                                                    | **No** — auto-generated                                                                                   |
+| File                                     | Purpose                                                           | Edited by user?                                                                                           |
+| ---------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `<repo>/.env`                            | Runtime, tunnel, and secrets configuration                        | **Yes**                                                                                                   |
+| `<repo>/.env.example`                    | Public template tracked in Git                                    | No                                                                                                        |
+| `<repo>/config/projects.yml`             | Project allowlist, local source paths, and optional `github_repo` | **Yes** — edit `source` for a different directory layout, add `github_repo: owner/repo` for GitHub access |
+| `~/.config/systemd/user/beemcp*.service` | Installed systemd units                                           | **No** — auto-generated                                                                                   |
+| `~/.config/beemcp/mcp.env`               | Generated MCP-only environment file (GitHub token only)           | **No** — auto-generated                                                                                   |
+| `~/.config/tunnel-client/*.yaml`         | Tunnel profile                                                    | **No** — auto-generated                                                                                   |
 
 - `.env` is Git-ignored, permissions `0600`.
 - Project source paths are resolved relative to `config/projects.yml`; unavailable projects are checked when accessed.
 - Generated systemd units and tunnel profiles are never edited manually.
 - After changing `.env`, run `./start.sh`.
-
-## Migration from legacy config
-
-If you had a previous setup with `~/.config/bee-dev-mcp/tunnel.env` and
-`~/.config/tunnel-client/bee-dev-mcp-test.yaml`:
-
-1. Copy your tunnel ID from the old tunnel-client profile.
-2. Copy your `CONTROL_PLANE_API_KEY` from the old `tunnel.env`.
-3. Write both values into the repo-local `.env`.
-4. Run `./start.sh setup`, `./start.sh restart`, `./start.sh doctor`.
-5. After confirming the stack works, delete the old files manually:
-   `rm -rf ~/.config/bee-dev-mcp`
-
-Credentials are **not** copied automatically.
 
 ## Safety boundary
 
@@ -205,9 +191,9 @@ final page always has `truncated=false`.
 ### Task preparation
 
 ```text
-Используй только Bee Dev MCP Test.
+Используй только BeeMCP Test.
 
-Через Bee Dev MCP Test прочитай проект beeagent в режиме A.
+Через BeeMCP Test прочитай проект beeagent в режиме A.
 
 Сравни ROADMAP beeagent и beeagent-rop.
 Подготовь формулировку итерации, Issue, prompt реализации и prompt тестирования.
@@ -218,7 +204,7 @@ final page always has `truncated=false`.
 ### Review (new protocol)
 
 ```text
-Используй только Bee Dev MCP Test.
+Используй только BeeMCP Test.
 
 Посмотри изменённые файлы в beeagent-pr123.
 Используй режим B.
@@ -235,7 +221,7 @@ final page always has `truncated=false`.
 
 ## GitHub context (`get_github_context`)
 
-Bee Dev MCP can read GitHub Issues and Pull Requests from allowlisted
+BeeMCP can read GitHub Issues and Pull Requests from allowlisted
 repositories. This is a **bounded read-only** operation:
 
 - Only `get_github_context` — no write operations.
@@ -256,7 +242,7 @@ repositories. This is a **bounded read-only** operation:
    - Pull requests: Read-only
 4. Copy the token into `<repo>/.env`:
    ```env
-   BEE_DEV_MCP_GITHUB_TOKEN=github_pat_...
+   BEEMCP_GITHUB_TOKEN=github_pat_...
    ```
 5. Run `./start.sh restart` and `./start.sh doctor`.
 
@@ -305,8 +291,8 @@ when the budget is exhausted, with corresponding `*_truncated` flags set.
 ### Safe token passing
 
 The GitHub token is read from the repo-local `.env` and written into a
-separate generated file at `~/.config/bee-dev-mcp/mcp.env` with permissions
-`0600`. This file contains only `BEE_DEV_MCP_GITHUB_TOKEN` and is used by the
+separate generated file at `~/.config/beemcp/mcp.env` with permissions
+`0600`. This file contains only `BEEMCP_GITHUB_TOKEN` and is used by the
 MCP systemd unit via `EnvironmentFile=`. The tunnel service continues to use
 the full repo-local `.env`. Other secrets (`CONTROL_PLANE_API_KEY`, tunnel ID)
 are never exposed to the MCP process.
@@ -343,7 +329,7 @@ are never exposed to the MCP process.
 The contract utility uses the real Streamable HTTP lifecycle: `initialize`,
 then `tools/list`. It runs against the local MCP URL before the tunnel starts.
 After changing a tool schema, restart both MCP and tunnel. If ChatGPT still
-shows an old schema, refresh or reconnect the Bee Dev MCP app/connector.
+shows an old schema, refresh or reconnect the BeeMCP app/connector.
 
 ## Health endpoints
 
@@ -363,7 +349,7 @@ Exact sequence to propagate changes:
 
 1. `./start.sh restart`
 2. `./start.sh doctor` — confirm local tools/list contains nine tools
-3. Open the Bee Dev MCP app settings in ChatGPT
+3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
@@ -387,22 +373,22 @@ Important:
 
 The stack runs as two systemd --user services:
 
-| Service                      | Purpose              |
-| ---------------------------- | -------------------- |
-| `bee-dev-mcp.service`        | FastMCP / MCP server |
-| `bee-dev-mcp-tunnel.service` | Tunnel / proxy       |
+| Service                 | Purpose              |
+| ----------------------- | -------------------- |
+| `beemcp.service`        | FastMCP / MCP server |
+| `beemcp-tunnel.service` | Tunnel / proxy       |
 
 ### Initial setup
 
 ```bash
-cd /home/bee/Pro/bee-dev-mcp
+cd /home/bee/Pro/beemcp
 ./start.sh setup
 ```
 
 `setup` verifies required programs and `.env`, runs `uv sync --frozen`,
 generates the tunnel-client profile (from `.env` values), generates a separate
-MCP environment file at `~/.config/bee-dev-mcp/mcp.env` containing only
-`BEE_DEV_MCP_GITHUB_TOKEN`, renders systemd units from portable
+MCP environment file at `~/.config/beemcp/mcp.env` containing only
+`BEEMCP_GITHUB_TOKEN`, renders systemd units from portable
 `ops/systemd/*.service.in` templates, installs them, and reloads the user
 manager.
 

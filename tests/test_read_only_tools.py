@@ -107,14 +107,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
         server_py = Path(__file__).resolve().parents[1] / "server.py"
         config_path = self.root / "_test_config.yml"
         config_path.write_text(config_text, encoding="utf-8")
-        old_config = os.environ.get("BEE_MCP_CONFIG")
-        old_host = os.environ.get("BEE_DEV_MCP_HOST")
-        old_port = os.environ.get("BEE_DEV_MCP_PORT")
-        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+        old_config = os.environ.get("BEEMCP_CONFIG")
+        old_host = os.environ.get("BEEMCP_HOST")
+        old_port = os.environ.get("BEEMCP_PORT")
+        old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
         try:
             spec = importlib.util.spec_from_file_location("_test_server", server_py)
             if spec is None or spec.loader is None:
@@ -125,21 +125,21 @@ class ReadOnlyToolsTests(unittest.TestCase):
             return module
         finally:
             if old_config is None:
-                os.environ.pop("BEE_MCP_CONFIG", None)
+                os.environ.pop("BEEMCP_CONFIG", None)
             else:
-                os.environ["BEE_MCP_CONFIG"] = old_config
+                os.environ["BEEMCP_CONFIG"] = old_config
             if old_host is None:
-                os.environ.pop("BEE_DEV_MCP_HOST", None)
+                os.environ.pop("BEEMCP_HOST", None)
             else:
-                os.environ["BEE_DEV_MCP_HOST"] = old_host
+                os.environ["BEEMCP_HOST"] = old_host
             if old_port is None:
-                os.environ.pop("BEE_DEV_MCP_PORT", None)
+                os.environ.pop("BEEMCP_PORT", None)
             else:
-                os.environ["BEE_DEV_MCP_PORT"] = old_port
+                os.environ["BEEMCP_PORT"] = old_port
             if old_token is None:
-                os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                os.environ.pop("BEEMCP_GITHUB_TOKEN", None)
             else:
-                os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
+                os.environ["BEEMCP_GITHUB_TOKEN"] = old_token
 
     def test_list_projects_returns_allowlisted_projects_and_modes(self) -> None:
         repo = self._init_repo("proj_a")
@@ -959,7 +959,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         response = asyncio.run(routes["/versionz"].endpoint(None))
         self.assertEqual(response.status_code, 200)
         data = json.loads(response.body)
-        self.assertEqual(data["service"], "bee-dev-mcp")
+        self.assertEqual(data["service"], "beemcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
         self.assertEqual(data["tool_contract_version"], 3)
@@ -1003,13 +1003,13 @@ class ReadOnlyToolsTests(unittest.TestCase):
         import importlib.util
 
         server_py = Path(__file__).resolve().parents[1] / "server.py"
-        old_host = os.environ.get("BEE_DEV_MCP_HOST")
-        old_port = os.environ.get("BEE_DEV_MCP_PORT")
-        old_config = os.environ.get("BEE_MCP_CONFIG")
-        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+        old_host = os.environ.get("BEEMCP_HOST")
+        old_port = os.environ.get("BEEMCP_PORT")
+        old_config = os.environ.get("BEEMCP_CONFIG")
+        old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
         try:
             spec = importlib.util.spec_from_file_location("_server_import", server_py)
             if spec is None or spec.loader is None:
@@ -1021,10 +1021,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
             self.assertTrue(hasattr(module, "get_review_bundle"))
         finally:
             for k, v in [
-                ("BEE_DEV_MCP_HOST", old_host),
-                ("BEE_DEV_MCP_PORT", old_port),
-                ("BEE_MCP_CONFIG", old_config),
-                ("BEE_DEV_MCP_GITHUB_TOKEN", old_token),
+                ("BEEMCP_HOST", old_host),
+                ("BEEMCP_PORT", old_port),
+                ("BEEMCP_CONFIG", old_config),
+                ("BEEMCP_GITHUB_TOKEN", old_token),
             ]:
                 if v is None:
                     os.environ.pop(k, None)
@@ -3415,10 +3415,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         old = {
             k: os.environ.pop(k, None)
-            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+            for k in ("BEEMCP_HOST", "BEEMCP_PORT", "BEEMCP_CONFIG")
         }
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
         try:
             spec = importlib.util.spec_from_file_location("_test_no_host", server_py)
             if spec is None or spec.loader is None:
@@ -3427,7 +3427,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             with self.assertRaises(RuntimeError) as ctx:
                 loader.exec_module(module)
-            self.assertIn("BEE_DEV_MCP_HOST", str(ctx.exception))
+            self.assertIn("BEEMCP_HOST", str(ctx.exception))
         finally:
             for k, v in old.items():
                 if v is not None:
@@ -3447,10 +3447,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         old = {
             k: os.environ.pop(k, None)
-            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+            for k in ("BEEMCP_HOST", "BEEMCP_PORT", "BEEMCP_CONFIG")
         }
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
         try:
             spec = importlib.util.spec_from_file_location("_test_no_port", server_py)
             if spec is None or spec.loader is None:
@@ -3459,7 +3459,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
             module = importlib.util.module_from_spec(spec)
             with self.assertRaises(RuntimeError) as ctx:
                 loader.exec_module(module)
-            self.assertIn("BEE_DEV_MCP_PORT", str(ctx.exception))
+            self.assertIn("BEEMCP_PORT", str(ctx.exception))
         finally:
             for k, v in old.items():
                 if v is not None:
@@ -3479,11 +3479,11 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         old = {
             k: os.environ.pop(k, None)
-            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+            for k in ("BEEMCP_HOST", "BEEMCP_PORT", "BEEMCP_CONFIG")
         }
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "99999"
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "99999"
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
         try:
             spec = importlib.util.spec_from_file_location("_test_bad_port", server_py)
             if spec is None or spec.loader is None:
@@ -3512,11 +3512,11 @@ class ReadOnlyToolsTests(unittest.TestCase):
         )
         old = {
             k: os.environ.pop(k, None)
-            for k in ("BEE_DEV_MCP_HOST", "BEE_DEV_MCP_PORT", "BEE_MCP_CONFIG")
+            for k in ("BEEMCP_HOST", "BEEMCP_PORT", "BEEMCP_CONFIG")
         }
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "not-a-number"
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "not-a-number"
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
         try:
             spec = importlib.util.spec_from_file_location("_test_nan_port", server_py)
             if spec is None or spec.loader is None:
@@ -3602,14 +3602,14 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 "    context_modes:\n      A:\n        files: []\n",
                 encoding="utf-8",
             )
-            old_config = os.environ.get("BEE_MCP_CONFIG")
-            old_host = os.environ.get("BEE_DEV_MCP_HOST")
-            old_port = os.environ.get("BEE_DEV_MCP_PORT")
-            old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-            os.environ["BEE_MCP_CONFIG"] = str(config)
-            os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-            os.environ["BEE_DEV_MCP_PORT"] = "8765"
-            os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+            old_config = os.environ.get("BEEMCP_CONFIG")
+            old_host = os.environ.get("BEEMCP_HOST")
+            old_port = os.environ.get("BEEMCP_PORT")
+            old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+            os.environ["BEEMCP_CONFIG"] = str(config)
+            os.environ["BEEMCP_HOST"] = "127.0.0.1"
+            os.environ["BEEMCP_PORT"] = "8765"
+            os.environ["BEEMCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
             try:
                 spec = importlib.util.spec_from_file_location(
                     "transport_cursor_server", ROOT / "server.py"
@@ -3726,21 +3726,21 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 if thread is not None:
                     thread.join(timeout=5)
                 if old_config is None:
-                    os.environ.pop("BEE_MCP_CONFIG", None)
+                    os.environ.pop("BEEMCP_CONFIG", None)
                 else:
-                    os.environ["BEE_MCP_CONFIG"] = old_config
+                    os.environ["BEEMCP_CONFIG"] = old_config
                 if old_host is None:
-                    os.environ.pop("BEE_DEV_MCP_HOST", None)
+                    os.environ.pop("BEEMCP_HOST", None)
                 else:
-                    os.environ["BEE_DEV_MCP_HOST"] = old_host
+                    os.environ["BEEMCP_HOST"] = old_host
                 if old_port is None:
-                    os.environ.pop("BEE_DEV_MCP_PORT", None)
+                    os.environ.pop("BEEMCP_PORT", None)
                 else:
-                    os.environ["BEE_DEV_MCP_PORT"] = old_port
+                    os.environ["BEEMCP_PORT"] = old_port
                 if old_token is None:
-                    os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                    os.environ.pop("BEEMCP_GITHUB_TOKEN", None)
                 else:
-                    os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
+                    os.environ["BEEMCP_GITHUB_TOKEN"] = old_token
 
     def test_live_tools_list_uses_streamable_http_lifecycle(self) -> None:
         import socket
@@ -3769,14 +3769,14 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 "    context_modes:\n      A:\n        files: []\n",
                 encoding="utf-8",
             )
-            old_config = os.environ.get("BEE_MCP_CONFIG")
-            old_host = os.environ.get("BEE_DEV_MCP_HOST")
-            old_port = os.environ.get("BEE_DEV_MCP_PORT")
-            old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-            os.environ["BEE_MCP_CONFIG"] = str(config)
-            os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-            os.environ["BEE_DEV_MCP_PORT"] = "8765"
-            os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+            old_config = os.environ.get("BEEMCP_CONFIG")
+            old_host = os.environ.get("BEEMCP_HOST")
+            old_port = os.environ.get("BEEMCP_PORT")
+            old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+            os.environ["BEEMCP_CONFIG"] = str(config)
+            os.environ["BEEMCP_HOST"] = "127.0.0.1"
+            os.environ["BEEMCP_PORT"] = "8765"
+            os.environ["BEEMCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
             try:
                 spec = importlib.util.spec_from_file_location(
                     "transport_server", ROOT / "server.py"
@@ -3821,21 +3821,21 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 if thread is not None:
                     thread.join(timeout=5)
                 if old_config is None:
-                    os.environ.pop("BEE_MCP_CONFIG", None)
+                    os.environ.pop("BEEMCP_CONFIG", None)
                 else:
-                    os.environ["BEE_MCP_CONFIG"] = old_config
+                    os.environ["BEEMCP_CONFIG"] = old_config
                 if old_host is None:
-                    os.environ.pop("BEE_DEV_MCP_HOST", None)
+                    os.environ.pop("BEEMCP_HOST", None)
                 else:
-                    os.environ["BEE_DEV_MCP_HOST"] = old_host
+                    os.environ["BEEMCP_HOST"] = old_host
                 if old_port is None:
-                    os.environ.pop("BEE_DEV_MCP_PORT", None)
+                    os.environ.pop("BEEMCP_PORT", None)
                 else:
-                    os.environ["BEE_DEV_MCP_PORT"] = old_port
+                    os.environ["BEEMCP_PORT"] = old_port
                 if old_token is None:
-                    os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                    os.environ.pop("BEEMCP_GITHUB_TOKEN", None)
                 else:
-                    os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
+                    os.environ["BEEMCP_GITHUB_TOKEN"] = old_token
 
 
 if __name__ == "__main__":

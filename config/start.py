@@ -18,20 +18,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ENV_FILE = PROJECT_ROOT / ".env"
 ENV_EXAMPLE = PROJECT_ROOT / ".env.example"
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
-MCP_SERVICE = "bee-dev-mcp.service"
-TUNNEL_SERVICE = "bee-dev-mcp-tunnel.service"
+MCP_SERVICE = "beemcp.service"
+TUNNEL_SERVICE = "beemcp-tunnel.service"
 MCP_TEMPLATE = PROJECT_ROOT / "ops" / "systemd" / f"{MCP_SERVICE}.in"
 TUNNEL_TEMPLATE = PROJECT_ROOT / "ops" / "systemd" / f"{TUNNEL_SERVICE}.in"
 CHECKER = PROJECT_ROOT / "scripts" / "check_mcp_tools.py"
 REQUIRED_ENV_VARS = (
-    "BEE_DEV_MCP_HOST",
-    "BEE_DEV_MCP_PORT",
-    "BEE_DEV_MCP_TUNNEL_PROFILE",
-    "BEE_DEV_MCP_TUNNEL_ID",
-    "BEE_DEV_MCP_TUNNEL_ADMIN_ADDR",
-    "BEE_DEV_MCP_CONTROL_PLANE_URL",
+    "BEEMCP_HOST",
+    "BEEMCP_PORT",
+    "BEEMCP_TUNNEL_PROFILE",
+    "BEEMCP_TUNNEL_ID",
+    "BEEMCP_TUNNEL_ADMIN_ADDR",
+    "BEEMCP_CONTROL_PLANE_URL",
     "CONTROL_PLANE_API_KEY",
-    "BEE_DEV_MCP_GITHUB_TOKEN",
+    "BEEMCP_GITHUB_TOKEN",
 )
 PROFILE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 
@@ -78,7 +78,7 @@ class RuntimeSettings:
 
     @property
     def mcp_env_file(self) -> Path:
-        return self.config_home / "bee-dev-mcp" / "mcp.env"
+        return self.config_home / "beemcp" / "mcp.env"
 
     @property
     def systemd_dir(self) -> Path:
@@ -137,41 +137,41 @@ def load_settings() -> RuntimeSettings:
             f"Missing required variables in {ENV_FILE}: {', '.join(missing)}"
         )
     try:
-        port = int(values["BEE_DEV_MCP_PORT"])
+        port = int(values["BEEMCP_PORT"])
     except ValueError as error:
-        raise LifecycleError("BEE_DEV_MCP_PORT must be an integer 1-65535") from error
+        raise LifecycleError("BEEMCP_PORT must be an integer 1-65535") from error
     if not 1 <= port <= 65535:
-        raise LifecycleError("BEE_DEV_MCP_PORT must be an integer 1-65535")
-    profile = values["BEE_DEV_MCP_TUNNEL_PROFILE"]
+        raise LifecycleError("BEEMCP_PORT must be an integer 1-65535")
+    profile = values["BEEMCP_TUNNEL_PROFILE"]
     if PROFILE_RE.fullmatch(profile) is None:
-        raise LifecycleError("BEE_DEV_MCP_TUNNEL_PROFILE has an invalid format")
+        raise LifecycleError("BEEMCP_TUNNEL_PROFILE has an invalid format")
     for name in (
-        "BEE_DEV_MCP_HOST",
-        "BEE_DEV_MCP_PORT",
-        "BEE_DEV_MCP_TUNNEL_PROFILE",
-        "BEE_DEV_MCP_TUNNEL_ID",
-        "BEE_DEV_MCP_TUNNEL_ADMIN_ADDR",
-        "BEE_DEV_MCP_CONTROL_PLANE_URL",
+        "BEEMCP_HOST",
+        "BEEMCP_PORT",
+        "BEEMCP_TUNNEL_PROFILE",
+        "BEEMCP_TUNNEL_ID",
+        "BEEMCP_TUNNEL_ADMIN_ADDR",
+        "BEEMCP_CONTROL_PLANE_URL",
     ):
         if any(character in values[name] for character in ("\0", "\n", "\r")):
             raise LifecycleError(f"{name} contains unsupported characters")
     config_home = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    github_token = values["BEE_DEV_MCP_GITHUB_TOKEN"]
+    github_token = values["BEEMCP_GITHUB_TOKEN"]
     if any(
         character.isspace() or not character.isprintable() for character in github_token
     ):
         raise LifecycleError(
-            "BEE_DEV_MCP_GITHUB_TOKEN contains whitespace or control characters"
+            "BEEMCP_GITHUB_TOKEN contains whitespace or control characters"
         )
     if len(github_token) < 10:
-        raise LifecycleError("BEE_DEV_MCP_GITHUB_TOKEN length is too short")
+        raise LifecycleError("BEEMCP_GITHUB_TOKEN length is too short")
     return RuntimeSettings(
-        host=values["BEE_DEV_MCP_HOST"],
+        host=values["BEEMCP_HOST"],
         port=port,
         profile=profile,
-        tunnel_id=values["BEE_DEV_MCP_TUNNEL_ID"],
-        tunnel_admin_addr=values["BEE_DEV_MCP_TUNNEL_ADMIN_ADDR"],
-        control_plane_url=values["BEE_DEV_MCP_CONTROL_PLANE_URL"],
+        tunnel_id=values["BEEMCP_TUNNEL_ID"],
+        tunnel_admin_addr=values["BEEMCP_TUNNEL_ADMIN_ADDR"],
+        control_plane_url=values["BEEMCP_CONTROL_PLANE_URL"],
         api_key=values["CONTROL_PLANE_API_KEY"],
         github_token=github_token,
         config_home=config_home,
@@ -216,7 +216,7 @@ def generate_tunnel_profile(settings: RuntimeSettings) -> None:
 
 
 def generate_mcp_env_file(settings: RuntimeSettings) -> None:
-    content = f"BEE_DEV_MCP_GITHUB_TOKEN={settings.github_token}\n"
+    content = f"BEEMCP_GITHUB_TOKEN={settings.github_token}\n"
     atomic_write(settings.mcp_env_file, content, 0o600)
 
 
@@ -338,7 +338,7 @@ def reconciliation(settings: RuntimeSettings, success_message: str) -> None:
         print()
         print("ChatGPT connector schema is not verified by local doctor.")
         print(
-            "After tool schema changes, refresh the Bee Dev MCP app actions "
+            "After tool schema changes, refresh the BeeMCP app actions "
             "and start a new chat."
         )
         print(success_message)
@@ -504,7 +504,7 @@ def cmd_doctor() -> None:
                     )
                 mcp_env_content = settings.mcp_env_file.read_text(encoding="utf-8")
                 expected_mcp_env_content = (
-                    f"BEE_DEV_MCP_GITHUB_TOKEN={settings.github_token}\n"
+                    f"BEEMCP_GITHUB_TOKEN={settings.github_token}\n"
                 )
                 if mcp_env_content != expected_mcp_env_content:
                     problems.append("MCP env file has unexpected content")

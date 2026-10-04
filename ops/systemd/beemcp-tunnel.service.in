@@ -1,7 +1,7 @@
 [Unit]
-Description=Bee Dev MCP tunnel
-After=bee-dev-mcp.service
-Requires=bee-dev-mcp.service
+Description=BeeMCP tunnel
+After=beemcp.service
+Requires=beemcp.service
 
 [Service]
 Type=simple

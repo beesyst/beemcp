@@ -42,7 +42,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bee-dev-mcp"
+name = "beemcp"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

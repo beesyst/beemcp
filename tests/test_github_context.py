@@ -110,15 +110,15 @@ class _ImportHelper:
         config_path.write_text(config_text, encoding="utf-8")
 
         self._env_backup = {
-            "BEE_MCP_CONFIG": os.environ.get("BEE_MCP_CONFIG"),
-            "BEE_DEV_MCP_HOST": os.environ.get("BEE_DEV_MCP_HOST"),
-            "BEE_DEV_MCP_PORT": os.environ.get("BEE_DEV_MCP_PORT"),
-            "BEE_DEV_MCP_GITHUB_TOKEN": os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN"),
+            "BEEMCP_CONFIG": os.environ.get("BEEMCP_CONFIG"),
+            "BEEMCP_HOST": os.environ.get("BEEMCP_HOST"),
+            "BEEMCP_PORT": os.environ.get("BEEMCP_PORT"),
+            "BEEMCP_GITHUB_TOKEN": os.environ.get("BEEMCP_GITHUB_TOKEN"),
         }
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = TEST_TOKEN
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_GITHUB_TOKEN"] = TEST_TOKEN
 
         import importlib.util
 
@@ -283,14 +283,14 @@ class GithubRepoConfigTests(unittest.TestCase):
 
     def _load(self, config_text: str) -> Any:
         path = self._temp_config(config_text)
-        old = os.environ.get("BEE_MCP_CONFIG")
-        old_host = os.environ.get("BEE_DEV_MCP_HOST")
-        old_port = os.environ.get("BEE_DEV_MCP_PORT")
-        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-        os.environ["BEE_MCP_CONFIG"] = str(path)
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = TEST_TOKEN
+        old = os.environ.get("BEEMCP_CONFIG")
+        old_host = os.environ.get("BEEMCP_HOST")
+        old_port = os.environ.get("BEEMCP_PORT")
+        old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+        os.environ["BEEMCP_CONFIG"] = str(path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_GITHUB_TOKEN"] = TEST_TOKEN
         try:
             import importlib.util
 
@@ -304,10 +304,10 @@ class GithubRepoConfigTests(unittest.TestCase):
             return mod
         finally:
             for k, v in [
-                ("BEE_MCP_CONFIG", old),
-                ("BEE_DEV_MCP_HOST", old_host),
-                ("BEE_DEV_MCP_PORT", old_port),
-                ("BEE_DEV_MCP_GITHUB_TOKEN", old_token),
+                ("BEEMCP_CONFIG", old),
+                ("BEEMCP_HOST", old_host),
+                ("BEEMCP_PORT", old_port),
+                ("BEEMCP_GITHUB_TOKEN", old_token),
             ]:
                 if v is None:
                     os.environ.pop(k, None)
@@ -1030,7 +1030,7 @@ class ApiRequestTests(unittest.TestCase):
 
         req = mock_urlopen.call_args_list[0][0][0]
         headers_lower = {k.lower(): v for k, v in req.headers.items()}
-        self.assertEqual(headers_lower.get("user-agent"), "bee-dev-mcp")
+        self.assertEqual(headers_lower.get("user-agent"), "beemcp")
 
     def test_timeout_is_set(self) -> None:
         import urllib.request
@@ -1766,24 +1766,24 @@ class SecretSafetyTests(unittest.TestCase):
         tmp = tempfile.mkdtemp()
         config_path = Path(tmp) / "config.yml"
         config_path.write_text(config, encoding="utf-8")
-        old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-        old_config = os.environ.get("BEE_MCP_CONFIG")
-        old_host = os.environ.get("BEE_DEV_MCP_HOST")
-        old_port = os.environ.get("BEE_DEV_MCP_PORT")
-        os.environ["BEE_MCP_CONFIG"] = str(config_path)
-        os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-        os.environ["BEE_DEV_MCP_PORT"] = "8765"
-        os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = self.TOKEN
+        old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+        old_config = os.environ.get("BEEMCP_CONFIG")
+        old_host = os.environ.get("BEEMCP_HOST")
+        old_port = os.environ.get("BEEMCP_PORT")
+        os.environ["BEEMCP_CONFIG"] = str(config_path)
+        os.environ["BEEMCP_HOST"] = "127.0.0.1"
+        os.environ["BEEMCP_PORT"] = "8765"
+        os.environ["BEEMCP_GITHUB_TOKEN"] = self.TOKEN
         spec = importlib.util.spec_from_file_location("_sec_test", ROOT / "server.py")
         if spec is None or spec.loader is None:
             raise RuntimeError("Cannot load")
         self.mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.mod)
         self._env_backup = {
-            "BEE_DEV_MCP_GITHUB_TOKEN": old_token,
-            "BEE_MCP_CONFIG": old_config,
-            "BEE_DEV_MCP_HOST": old_host,
-            "BEE_DEV_MCP_PORT": old_port,
+            "BEEMCP_GITHUB_TOKEN": old_token,
+            "BEEMCP_CONFIG": old_config,
+            "BEEMCP_HOST": old_host,
+            "BEEMCP_PORT": old_port,
         }
 
     def tearDown(self) -> None:
@@ -1850,7 +1850,7 @@ class SecretSafetyTests(unittest.TestCase):
     def test_token_not_in_runtime_error_invalid_config(self) -> None:
         """server.py RuntimeError for empty token doesn't leak the token (static check)."""
         source = (ROOT / "server.py").read_text(encoding="utf-8")
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN must be set", source)
+        self.assertIn("BEEMCP_GITHUB_TOKEN must be set", source)
         self.assertNotIn("github_pat_", source)
 
 
@@ -1978,25 +1978,25 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
 
 
 class DotEnvTests(unittest.TestCase):
-    """Test .env validation for BEE_DEV_MCP_GITHUB_TOKEN."""
+    """Test .env validation for BEEMCP_GITHUB_TOKEN."""
 
     def test_env_example_has_empty_token(self) -> None:
         content = (ROOT / ".env.example").read_text(encoding="utf-8")
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN=", content)
+        self.assertIn("BEEMCP_GITHUB_TOKEN=", content)
         for line in content.splitlines():
-            if line.startswith("BEE_DEV_MCP_GITHUB_TOKEN="):
+            if line.startswith("BEEMCP_GITHUB_TOKEN="):
                 value = line.split("=", 1)[1]
                 self.assertEqual(value, "")
 
     def test_token_required_in_required_env_vars(self) -> None:
-        """BEE_DEV_MCP_GITHUB_TOKEN is listed in REQUIRED_ENV_VARS (static check)."""
+        """BEEMCP_GITHUB_TOKEN is listed in REQUIRED_ENV_VARS (static check)."""
         source = (ROOT / "config/start.py").read_text(encoding="utf-8")
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN", source)
+        self.assertIn("BEEMCP_GITHUB_TOKEN", source)
 
     def test_token_with_space_rejected_by_startpy(self) -> None:
         """start.py validates token whitespace (static check)."""
         source = (ROOT / "config/start.py").read_text(encoding="utf-8")
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN", source)
+        self.assertIn("BEEMCP_GITHUB_TOKEN", source)
         self.assertIn("whitespace", source.lower())
 
     def test_token_too_short_rejected_by_serverpy(self) -> None:
@@ -2013,35 +2013,31 @@ class McpEnvFileTests(unittest.TestCase):
         source = (ROOT / "config/start.py").read_text(encoding="utf-8")
         self.assertIn("def generate_mcp_env_file", source)
         self.assertIn("mcp.env", source)
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN", source)
+        self.assertIn("BEEMCP_GITHUB_TOKEN", source)
 
     def test_mcp_env_file_does_not_contain_other_secrets(self) -> None:
         source = (ROOT / "config/start.py").read_text(encoding="utf-8")
         gen_fn = source[source.find("def generate_mcp_env_file") :]
         gen_fn = gen_fn[: gen_fn.find("\ndef ")]
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN", gen_fn)
+        self.assertIn("BEEMCP_GITHUB_TOKEN", gen_fn)
         self.assertNotIn("CONTROL_PLANE_API_KEY", gen_fn)
-        self.assertNotIn("BEE_DEV_MCP_TUNNEL_ID", gen_fn)
-        self.assertNotIn("BEE_DEV_MCP_CONTROL_PLANE_URL", gen_fn)
+        self.assertNotIn("BEEMCP_TUNNEL_ID", gen_fn)
+        self.assertNotIn("BEEMCP_CONTROL_PLANE_URL", gen_fn)
 
     def test_mcp_unit_does_not_use_repo_env(self) -> None:
-        template = (ROOT / "ops/systemd/bee-dev-mcp.service.in").read_text(
-            encoding="utf-8"
-        )
+        template = (ROOT / "ops/systemd/beemcp.service.in").read_text(encoding="utf-8")
         self.assertIn("MCP_ENV_FILE", template)
         self.assertNotIn(".env", template.replace("MCP_ENV_FILE", ""))
 
     def test_tunnel_unit_uses_repo_env_not_mcp_env(self) -> None:
-        template = (ROOT / "ops/systemd/bee-dev-mcp-tunnel.service.in").read_text(
+        template = (ROOT / "ops/systemd/beemcp-tunnel.service.in").read_text(
             encoding="utf-8"
         )
         self.assertIn("ENV_FILE", template)
         self.assertNotIn("MCP_ENV_FILE", template)
 
     def test_service_template_has_no_token_value(self) -> None:
-        content = (ROOT / "ops/systemd/bee-dev-mcp.service.in").read_text(
-            encoding="utf-8"
-        )
+        content = (ROOT / "ops/systemd/beemcp.service.in").read_text(encoding="utf-8")
         self.assertNotIn("github_pat", content)
         self.assertNotIn("ghp_", content)
         self.assertNotIn("ghs_", content)
@@ -2165,7 +2161,7 @@ class DocumentationTests(unittest.TestCase):
 
     def test_readme_mentions_github_token(self) -> None:
         content = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("BEE_DEV_MCP_GITHUB_TOKEN", content)
+        self.assertIn("BEEMCP_GITHUB_TOKEN", content)
 
     def test_readme_mentions_github_repo(self) -> None:
         content = (ROOT / "README.md").read_text(encoding="utf-8")

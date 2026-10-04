@@ -31,31 +31,29 @@ from mcp_contract import (
 
 HERE = Path(__file__).resolve().parent
 
-MCP_HOST = os.environ.get("BEE_DEV_MCP_HOST")
-MCP_PORT_STR = os.environ.get("BEE_DEV_MCP_PORT")
+MCP_HOST = os.environ.get("BEEMCP_HOST")
+MCP_PORT_STR = os.environ.get("BEEMCP_PORT")
 
 if not MCP_HOST:
-    raise RuntimeError("BEE_DEV_MCP_HOST must be set and non-empty")
+    raise RuntimeError("BEEMCP_HOST must be set and non-empty")
 if not MCP_PORT_STR:
-    raise RuntimeError("BEE_DEV_MCP_PORT must be set")
+    raise RuntimeError("BEEMCP_PORT must be set")
 try:
     MCP_PORT = int(MCP_PORT_STR)
 except ValueError:
-    raise RuntimeError(f"BEE_DEV_MCP_PORT must be an integer, got: {MCP_PORT_STR!r}")
+    raise RuntimeError(f"BEEMCP_PORT must be an integer, got: {MCP_PORT_STR!r}")
 if not (1 <= MCP_PORT <= 65535):
-    raise RuntimeError(f"BEE_DEV_MCP_PORT must be between 1 and 65535, got: {MCP_PORT}")
+    raise RuntimeError(f"BEEMCP_PORT must be between 1 and 65535, got: {MCP_PORT}")
 
-GITHUB_TOKEN = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN", "")
+GITHUB_TOKEN = os.environ.get("BEEMCP_GITHUB_TOKEN", "")
 if not GITHUB_TOKEN:
-    raise RuntimeError("BEE_DEV_MCP_GITHUB_TOKEN must be set and non-empty")
+    raise RuntimeError("BEEMCP_GITHUB_TOKEN must be set and non-empty")
 if any(
     character.isspace() or not character.isprintable() for character in GITHUB_TOKEN
 ):
-    raise RuntimeError(
-        "BEE_DEV_MCP_GITHUB_TOKEN contains whitespace or control characters"
-    )
+    raise RuntimeError("BEEMCP_GITHUB_TOKEN contains whitespace or control characters")
 if len(GITHUB_TOKEN) < 10:
-    raise RuntimeError("BEE_DEV_MCP_GITHUB_TOKEN length is too short")
+    raise RuntimeError("BEEMCP_GITHUB_TOKEN length is too short")
 
 GITHUB_API_BASE = "https://api.github.com"
 GITHUB_API_TIMEOUT = 15
@@ -72,7 +70,7 @@ GITHUB_URL_RE = re.compile(
 )
 
 CONFIG_PATH = Path(
-    os.environ.get("BEE_MCP_CONFIG", HERE / "config" / "projects.yml")
+    os.environ.get("BEEMCP_CONFIG", HERE / "config" / "projects.yml")
 ).expanduser()
 if not CONFIG_PATH.is_absolute():
     CONFIG_PATH = HERE / CONFIG_PATH
@@ -284,7 +282,7 @@ DENY_PATTERNS: list[str] = CONFIG["deny_paths"]
 PROJECTS: dict[str, Any] = CONFIG["projects"]
 
 mcp = FastMCP(
-    name="Bee Dev Read-Only Review",
+    name="BeeMCP Read-Only Review",
     host=MCP_HOST,
     port=MCP_PORT,
     instructions=(
@@ -2223,7 +2221,7 @@ def _gh_api_request(path: str) -> Any:
             "Authorization": f"Bearer {GITHUB_TOKEN}",
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "bee-dev-mcp",
+            "User-Agent": "beemcp",
         },
     )
     try:
@@ -2575,7 +2573,7 @@ async def _versionz(request: Any) -> JSONResponse:
         head = "unknown"
     return JSONResponse(
         {
-            "service": "bee-dev-mcp",
+            "service": "beemcp",
             "git_head": head,
             "tool_contract_version": TOOL_CONTRACT_VERSION,
             "tool_count": len(EXPECTED_TOOLS),

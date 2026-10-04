@@ -26,10 +26,10 @@ deny_paths:
   - "**/.venv/**"
 
 projects:
-  bee-dev-mcp:
+  beemcp:
     source: ..
     base_branch: main
-    github_repo: beesyst/bee-dev-mcp
+    github_repo: beesyst/beemcp
     context_modes:
       A:
         files:
@@ -44,8 +44,8 @@ projects:
           - .env.example
           - config/projects.yml
           - config/start.py
-          - ops/systemd/bee-dev-mcp.service.in
-          - ops/systemd/bee-dev-mcp-tunnel.service.in
+          - ops/systemd/beemcp.service.in
+          - ops/systemd/beemcp-tunnel.service.in
       C:
         extends: B
         tree_roots:

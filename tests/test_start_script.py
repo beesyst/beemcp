@@ -15,6 +15,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -30,7 +32,7 @@ def writable_tmp_root() -> Path | None:
         if not candidate.is_dir():
             continue
         try:
-            probe = Path(tempfile.mkdtemp(prefix="bee-dev-mcp-probe-", dir=candidate))
+            probe = Path(tempfile.mkdtemp(prefix="beemcp-probe-", dir=candidate))
         except OSError:
             continue
         probe.rmdir()
@@ -41,14 +43,14 @@ def writable_tmp_root() -> Path | None:
 TMP_ROOT = writable_tmp_root()
 
 ENV_CONTENT = """\
-BEE_DEV_MCP_HOST=127.0.0.1
-BEE_DEV_MCP_PORT=8765
-BEE_DEV_MCP_TUNNEL_PROFILE=bee-dev-mcp
-BEE_DEV_MCP_TUNNEL_ID=test-tunnel
-BEE_DEV_MCP_TUNNEL_ADMIN_ADDR=127.0.0.1:8080
-BEE_DEV_MCP_CONTROL_PLANE_URL=https://api.openai.com
+BEEMCP_HOST=127.0.0.1
+BEEMCP_PORT=8765
+BEEMCP_TUNNEL_PROFILE=beemcp
+BEEMCP_TUNNEL_ID=test-tunnel
+BEEMCP_TUNNEL_ADMIN_ADDR=127.0.0.1:8080
+BEEMCP_CONTROL_PLANE_URL=https://api.openai.com
 CONTROL_PLANE_API_KEY=sk-test-never-print
-BEE_DEV_MCP_GITHUB_TOKEN=github_test_token_placeholder
+BEEMCP_GITHUB_TOKEN=github_test_token_placeholder
 """
 
 
@@ -70,7 +72,7 @@ class StartScriptTests(unittest.TestCase):
         shutil.copy2(ROOT / "start.sh", self.repo / "start.sh")
         shutil.copy2(ROOT / "config/start.py", self.repo / "config/start.py")
         shutil.copy2(ROOT / ".env.example", self.repo / ".env.example")
-        for name in ("bee-dev-mcp.service.in", "bee-dev-mcp-tunnel.service.in"):
+        for name in ("beemcp.service.in", "beemcp-tunnel.service.in"):
             shutil.copy2(ROOT / "ops/systemd" / name, self.repo / "ops/systemd" / name)
         env_file = self.repo / ".env"
         env_file.write_text(ENV_CONTENT, encoding="utf-8")
@@ -97,11 +99,11 @@ class StartScriptTests(unittest.TestCase):
 echo "systemctl $*" >> "$CALL_LOG"
 case " $* " in
   *" show-environment "*) [ "${FAIL_MANAGER:-0}" = 0 ] ;;
-  *" is-active bee-dev-mcp.service "*) [ "${FAIL_MCP_ACTIVE:-0}" = 0 ] ;;
-  *" is-active bee-dev-mcp-tunnel.service "*) [ "${FAIL_TUNNEL_ACTIVE:-0}" = 0 ] ;;
-  *" status bee-dev-mcp.service "*) [ "${FAIL_MCP_STATUS:-0}" = 0 ] ;;
-  *" status bee-dev-mcp-tunnel.service "*) [ "${FAIL_TUNNEL_STATUS:-0}" = 0 ] ;;
-  *" start bee-dev-mcp-tunnel.service "*) [ "${FAIL_TUNNEL_START:-0}" = 0 ] ;;
+  *" is-active beemcp.service "*) [ "${FAIL_MCP_ACTIVE:-0}" = 0 ] ;;
+  *" is-active beemcp-tunnel.service "*) [ "${FAIL_TUNNEL_ACTIVE:-0}" = 0 ] ;;
+  *" status beemcp.service "*) [ "${FAIL_MCP_STATUS:-0}" = 0 ] ;;
+  *" status beemcp-tunnel.service "*) [ "${FAIL_TUNNEL_STATUS:-0}" = 0 ] ;;
+  *" start beemcp-tunnel.service "*) [ "${FAIL_TUNNEL_START:-0}" = 0 ] ;;
   *) exit 0 ;;
 esac
 """,
@@ -127,7 +129,7 @@ case "$*" in
   *healthz*) [ "${FAIL_HEALTH:-0}" = 0 ] ;;
   *versionz*)
     [ "${FAIL_VERSIONZ:-0}" = 0 ] && \
-      echo '{"service":"bee-dev-mcp","git_head":"abc123","tool_contract_version":3,"tool_count":9,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
+      echo '{"service":"beemcp","git_head":"abc123","tool_contract_version":3,"tool_count":9,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
     [ "${FAIL_VERSIONZ:-0}" = 0 ]
     ;;
   *) exit 0 ;;
@@ -169,26 +171,26 @@ esac
         target = self.home / ".config/systemd/user"
         target.mkdir(parents=True, exist_ok=True)
         mcp_unit_content = (
-            'Environment="BEE_DEV_MCP_HOST=127.0.0.1"\n'
-            f"EnvironmentFile={self.home / '.config/bee-dev-mcp/mcp.env'}\n"
+            'Environment="BEEMCP_HOST=127.0.0.1"\n'
+            f"EnvironmentFile={self.home / '.config/beemcp/mcp.env'}\n"
         )
-        for name in ("bee-dev-mcp.service", "bee-dev-mcp-tunnel.service"):
+        for name in ("beemcp.service", "beemcp-tunnel.service"):
             (target / name).write_text(
-                mcp_unit_content if name == "bee-dev-mcp.service" else "",
+                mcp_unit_content if name == "beemcp.service" else "",
                 encoding="utf-8",
             )
         profile_dir = self.home / ".config/tunnel-client"
         profile_dir.mkdir(parents=True, exist_ok=True)
-        (profile_dir / "bee-dev-mcp.yaml").write_text(
+        (profile_dir / "beemcp.yaml").write_text(
             "mcp:\n  server_urls:\n    - channel: main\n"
             '      url: "http://127.0.0.1:8765/mcp"\n',
             encoding="utf-8",
         )
-        mcp_env_dir = self.home / ".config/bee-dev-mcp"
+        mcp_env_dir = self.home / ".config/beemcp"
         mcp_env_dir.mkdir(parents=True, exist_ok=True)
         mcp_env_file = mcp_env_dir / "mcp.env"
         mcp_env_file.write_text(
-            "BEE_DEV_MCP_GITHUB_TOKEN=github_test_token_placeholder\n", encoding="utf-8"
+            "BEEMCP_GITHUB_TOKEN=github_test_token_placeholder\n", encoding="utf-8"
         )
         mcp_env_file.chmod(0o600)
 
@@ -214,7 +216,7 @@ esac
             output,
         )
         self.assertIn("Missing required variables", output)
-        self.assertIn("BEE_DEV_MCP_TUNNEL_ID", output)
+        self.assertIn("BEEMCP_TUNNEL_ID", output)
         self.assertIn("CONTROL_PLANE_API_KEY", output)
         self.assertNotIn("sk-test", output)
 
@@ -233,9 +235,9 @@ esac
         self.assertIn("systemctl --user daemon-reload", calls)
         self.assertFalse(any(" start " in f" {call} " for call in calls))
         target = self.home / ".config/systemd/user"
-        for name in ("bee-dev-mcp.service", "bee-dev-mcp-tunnel.service"):
+        for name in ("beemcp.service", "beemcp-tunnel.service"):
             self.assertTrue((target / name).is_file())
-        profile_path = self.home / ".config/tunnel-client/bee-dev-mcp.yaml"
+        profile_path = self.home / ".config/tunnel-client/beemcp.yaml"
         self.assertTrue(profile_path.is_file())
 
     def test_setup_restricts_existing_dotenv_permissions(self) -> None:
@@ -257,9 +259,7 @@ esac
     def test_missing_dotenv_variable_cannot_use_parent_environment(self) -> None:
         content = (self.repo / ".env").read_text(encoding="utf-8")
         content = "\n".join(
-            line
-            for line in content.splitlines()
-            if not line.startswith("BEE_DEV_MCP_PORT=")
+            line for line in content.splitlines() if not line.startswith("BEEMCP_PORT=")
         )
         (self.repo / ".env").write_text(
             content + "\n",
@@ -268,24 +268,24 @@ esac
 
         result = self.run_script(
             "setup",
-            BEE_DEV_MCP_PORT="9999",
+            BEEMCP_PORT="9999",
         )
 
         self.assertNotEqual(result.returncode, 0)
         output = result.stdout + result.stderr
         self.assertIn("Missing required variables", output)
-        self.assertIn("BEE_DEV_MCP_PORT", output)
+        self.assertIn("BEEMCP_PORT", output)
 
     def test_profile_generated_from_env_with_custom_values(self) -> None:
         (self.repo / ".env").write_text(
-            "BEE_DEV_MCP_HOST=10.0.0.1\n"
-            "BEE_DEV_MCP_PORT=9999\n"
-            "BEE_DEV_MCP_TUNNEL_PROFILE=custom-profile\n"
-            "BEE_DEV_MCP_TUNNEL_ID=custom-tunnel\n"
-            "BEE_DEV_MCP_TUNNEL_ADMIN_ADDR=0.0.0.0:9090\n"
-            "BEE_DEV_MCP_CONTROL_PLANE_URL=https://custom.example.com\n"
+            "BEEMCP_HOST=10.0.0.1\n"
+            "BEEMCP_PORT=9999\n"
+            "BEEMCP_TUNNEL_PROFILE=custom-profile\n"
+            "BEEMCP_TUNNEL_ID=custom-tunnel\n"
+            "BEEMCP_TUNNEL_ADMIN_ADDR=0.0.0.0:9090\n"
+            "BEEMCP_CONTROL_PLANE_URL=https://custom.example.com\n"
             "CONTROL_PLANE_API_KEY=sk-custom\n"
-            "BEE_DEV_MCP_GITHUB_TOKEN=github_test_token_placeholder\n",
+            "BEEMCP_GITHUB_TOKEN=github_test_token_placeholder\n",
             encoding="utf-8",
         )
         self.run_script("setup")
@@ -296,7 +296,10 @@ esac
         self.assertIn("custom-tunnel", content)
         self.assertIn("0.0.0.0:9090", content)
         self.assertIn("https://custom.example.com", content)
-        self.assertIn('api_key: "env:CONTROL_PLANE_API_KEY"', content)
+        self.assertEqual(
+            yaml.safe_load(content)["control_plane"]["api_key"],
+            "env:CONTROL_PLANE_API_KEY",
+        )
         self.assertNotIn("sk-custom", content)
         self.assertEqual(stat.S_IMODE(profile_path.stat().st_mode), 0o600)
 
@@ -309,14 +312,14 @@ esac
         self.assertIn("--url http://127.0.0.1:8765/mcp", calls[check])
 
         (self.repo / ".env").write_text(
-            "BEE_DEV_MCP_HOST=127.0.0.1\n"
-            "BEE_DEV_MCP_PORT=9999\n"
-            "BEE_DEV_MCP_TUNNEL_PROFILE=bee-dev-mcp\n"
-            "BEE_DEV_MCP_TUNNEL_ID=test-tunnel\n"
-            "BEE_DEV_MCP_TUNNEL_ADMIN_ADDR=127.0.0.1:8080\n"
-            "BEE_DEV_MCP_CONTROL_PLANE_URL=https://api.openai.com\n"
+            "BEEMCP_HOST=127.0.0.1\n"
+            "BEEMCP_PORT=9999\n"
+            "BEEMCP_TUNNEL_PROFILE=beemcp\n"
+            "BEEMCP_TUNNEL_ID=test-tunnel\n"
+            "BEEMCP_TUNNEL_ADMIN_ADDR=127.0.0.1:8080\n"
+            "BEEMCP_CONTROL_PLANE_URL=https://api.openai.com\n"
             "CONTROL_PLANE_API_KEY=sk-test\n"
-            "BEE_DEV_MCP_GITHUB_TOKEN=github_test_token_placeholder\n",
+            "BEEMCP_GITHUB_TOKEN=github_test_token_placeholder\n",
             encoding="utf-8",
         )
         self.log.unlink(missing_ok=True)
@@ -325,16 +328,16 @@ esac
         calls = self.calls()
         check = next(i for i, c in enumerate(calls) if c.startswith("python "))
         self.assertIn("--url http://127.0.0.1:9999/mcp", calls[check])
-        profile_path = self.home / ".config/tunnel-client/bee-dev-mcp.yaml"
+        profile_path = self.home / ".config/tunnel-client/beemcp.yaml"
         self.assertIn("127.0.0.1:9999/mcp", profile_path.read_text(encoding="utf-8"))
-        mcp_unit = self.home / ".config/systemd/user/bee-dev-mcp.service"
-        self.assertIn("BEE_DEV_MCP_PORT=9999", mcp_unit.read_text(encoding="utf-8"))
+        mcp_unit = self.home / ".config/systemd/user/beemcp.service"
+        self.assertIn("BEEMCP_PORT=9999", mcp_unit.read_text(encoding="utf-8"))
 
     def test_source_templates_have_no_hardcoded_paths_or_secrets(self) -> None:
-        for name in ("bee-dev-mcp.service.in", "bee-dev-mcp-tunnel.service.in"):
+        for name in ("beemcp.service.in", "beemcp-tunnel.service.in"):
             content = (ROOT / "ops/systemd" / name).read_text(encoding="utf-8")
             self.assertNotIn("/home/bee", content)
-            self.assertNotIn("bee-dev-mcp-test", content)
+            self.assertNotIn("beemcp-test", content)
             self.assertNotIn("127.0.0.1:8000", content)
             self.assertNotIn("127.0.0.1:8765", content)
             self.assertNotIn("sk-", content)
@@ -342,30 +345,30 @@ esac
 
     def test_installed_mcp_unit_uses_repo_python_host_port_no_secrets(self) -> None:
         self.run_script("setup")
-        unit = (self.home / ".config/systemd/user/bee-dev-mcp.service").read_text(
+        unit = (self.home / ".config/systemd/user/beemcp.service").read_text(
             encoding="utf-8"
         )
-        self.assertIn(f'WorkingDirectory="{self.repo}"', unit)
+        self.assertIn(f"WorkingDirectory={self.repo}", unit)
         self.assertIn(
             f'ExecStart="{self.repo}/.venv/bin/python" "{self.repo}/server.py"', unit
         )
-        self.assertIn("BEE_DEV_MCP_HOST=127.0.0.1", unit)
-        self.assertIn("BEE_DEV_MCP_PORT=8765", unit)
+        self.assertIn("BEEMCP_HOST=127.0.0.1", unit)
+        self.assertIn("BEEMCP_PORT=8765", unit)
         self.assertNotIn("CONTROL_PLANE_API_KEY", unit)
-        self.assertNotIn(".env", unit)
+        self.assertNotIn(f"EnvironmentFile={self.repo / '.env'}", unit)
         self.assertIn("EnvironmentFile=", unit)
         self.assertIn("mcp.env", unit)
 
     def test_installed_tunnel_unit_uses_tunnel_client_and_dotenv(self) -> None:
         self.run_script("setup")
-        unit = (
-            self.home / ".config/systemd/user/bee-dev-mcp-tunnel.service"
-        ).read_text(encoding="utf-8")
-        self.assertIn(f'EnvironmentFile="{self.repo / ".env"}"', unit)
-        self.assertIn('run --profile "bee-dev-mcp"', unit)
-        self.assertIn("After=bee-dev-mcp.service", unit)
-        self.assertIn("Requires=bee-dev-mcp.service", unit)
-        self.assertNotIn("bee-dev-mcp-test", unit)
+        unit = (self.home / ".config/systemd/user/beemcp-tunnel.service").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f"EnvironmentFile={self.repo / '.env'}", unit)
+        self.assertIn('run --profile "beemcp"', unit)
+        self.assertIn("After=beemcp.service", unit)
+        self.assertIn("Requires=beemcp.service", unit)
+        self.assertNotIn("beemcp-test", unit)
 
     def test_up_and_restart_sync_profile_and_units_before_tunnel(self) -> None:
         self.install_units()
@@ -377,21 +380,21 @@ esac
         result = self.run_script("up", FAIL_TOOLS="1")
         self.assertNotEqual(result.returncode, 0)
         calls = self.calls()
-        self.assertIn("systemctl --user stop bee-dev-mcp.service", calls)
-        self.assertNotIn("systemctl --user start bee-dev-mcp-tunnel.service", calls)
+        self.assertIn("systemctl --user stop beemcp.service", calls)
+        self.assertNotIn("systemctl --user start beemcp-tunnel.service", calls)
 
     def test_failed_tunnel_start_cleans_up_both_services(self) -> None:
         self.install_units()
         result = self.run_script("up", FAIL_TUNNEL_START="1")
         self.assertNotEqual(result.returncode, 0)
         calls = self.calls()
-        self.assertIn("systemctl --user start bee-dev-mcp-tunnel.service", calls)
+        self.assertIn("systemctl --user start beemcp-tunnel.service", calls)
         self.assertGreaterEqual(
-            calls.count("systemctl --user stop bee-dev-mcp-tunnel.service"),
+            calls.count("systemctl --user stop beemcp-tunnel.service"),
             2,
         )
         self.assertGreaterEqual(
-            calls.count("systemctl --user stop bee-dev-mcp.service"),
+            calls.count("systemctl --user stop beemcp.service"),
             2,
         )
 
@@ -401,10 +404,8 @@ esac
         result = self.run_script("up", FAIL_READY="1")
         self.assertNotEqual(result.returncode, 0)
         calls = self.calls()
-        self.assertNotIn("systemctl --user start bee-dev-mcp-tunnel.service", calls)
-        self.assertIn(
-            "journalctl --user -u bee-dev-mcp.service --no-pager -n 40", calls
-        )
+        self.assertNotIn("systemctl --user start beemcp-tunnel.service", calls)
+        self.assertIn("journalctl --user -u beemcp.service --no-pager -n 40", calls)
 
     def test_doctor_passes_when_everything_ok(self) -> None:
         self.install_units()
@@ -420,7 +421,7 @@ esac
         self.install_units()
         profile_dir = self.home / ".config/tunnel-client"
         profile_dir.mkdir(parents=True, exist_ok=True)
-        (profile_dir / "bee-dev-mcp.yaml").write_text(
+        (profile_dir / "beemcp.yaml").write_text(
             'mcp:\n  server_urls:\n    - channel: main\n      url: "http://127.0.0.1:8000/mcp"\n',
             encoding="utf-8",
         )
@@ -448,14 +449,14 @@ esac
         content = (self.repo / ".env").read_text(encoding="utf-8")
         (self.repo / ".env").write_text(
             content.replace(
-                "BEE_DEV_MCP_TUNNEL_PROFILE=bee-dev-mcp",
-                "BEE_DEV_MCP_TUNNEL_PROFILE=../../escape",
+                "BEEMCP_TUNNEL_PROFILE=beemcp",
+                "BEEMCP_TUNNEL_PROFILE=../../escape",
             ),
             encoding="utf-8",
         )
         result = self.run_script("setup")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("BEE_DEV_MCP_TUNNEL_PROFILE", result.stdout + result.stderr)
+        self.assertIn("BEEMCP_TUNNEL_PROFILE", result.stdout + result.stderr)
 
     def test_doctor_hides_transport_exception_details(self) -> None:
         self.install_units()
@@ -474,7 +475,7 @@ esac
         self.assertNotEqual(result.returncode, 0)
         output = result.stdout + result.stderr
         self.assertIn("systemd user manager unavailable", output)
-        self.assertIn("service inactive: bee-dev-mcp.service", output)
+        self.assertIn("service inactive: beemcp.service", output)
         self.assertIn("health endpoint unavailable", output)
         self.assertNotIn("sk-test", output)
         calls = self.calls()
@@ -489,22 +490,18 @@ esac
         calls = self.calls()
         systemctl_calls = [call for call in calls if call.startswith("systemctl ")]
         self.assertEqual(
-            systemctl_calls[0], "systemctl --user stop bee-dev-mcp-tunnel.service"
+            systemctl_calls[0], "systemctl --user stop beemcp-tunnel.service"
         )
-        self.assertEqual(
-            systemctl_calls[1], "systemctl --user stop bee-dev-mcp.service"
-        )
+        self.assertEqual(systemctl_calls[1], "systemctl --user stop beemcp.service")
         # daemon-reload happens before start
         daemon_idx = next(i for i, c in enumerate(calls) if "daemon-reload" in c)
-        start_idx = next(
-            i for i, c in enumerate(calls) if "start bee-dev-mcp.service" in c
-        )
+        start_idx = next(i for i, c in enumerate(calls) if "start beemcp.service" in c)
         self.assertLess(daemon_idx, start_idx)
         ready = next(i for i, call in enumerate(calls) if "readyz" in call)
-        tunnel = calls.index("systemctl --user start bee-dev-mcp-tunnel.service")
+        tunnel = calls.index("systemctl --user start beemcp-tunnel.service")
         self.assertLess(ready, tunnel)
-        self.assertIn("systemctl --user is-active bee-dev-mcp.service", calls)
-        self.assertIn("systemctl --user is-active bee-dev-mcp-tunnel.service", calls)
+        self.assertIn("systemctl --user is-active beemcp.service", calls)
+        self.assertIn("systemctl --user is-active beemcp-tunnel.service", calls)
 
     def test_check_tools_uses_derived_url_and_precedes_tunnel(self) -> None:
         self.install_units()
@@ -512,7 +509,7 @@ esac
         self.assertEqual(result.returncode, 0, result.stderr)
         calls = self.calls()
         check = next(i for i, call in enumerate(calls) if call.startswith("python "))
-        tunnel = calls.index("systemctl --user start bee-dev-mcp-tunnel.service")
+        tunnel = calls.index("systemctl --user start beemcp-tunnel.service")
         self.assertIn("-B", calls[check])
         self.assertIn("--url http://127.0.0.1:8765/mcp", calls[check])
         self.assertLess(check, tunnel)
@@ -536,8 +533,8 @@ esac
         self.assertEqual(
             self.calls(),
             [
-                "systemctl --user stop bee-dev-mcp-tunnel.service",
-                "systemctl --user stop bee-dev-mcp.service",
+                "systemctl --user stop beemcp-tunnel.service",
+                "systemctl --user stop beemcp.service",
             ],
         )
 
@@ -547,9 +544,7 @@ esac
         journal = [call for call in self.calls() if call.startswith("journalctl ")]
         self.assertEqual(
             journal,
-            [
-                "journalctl --user -u bee-dev-mcp.service -u bee-dev-mcp-tunnel.service -f"
-            ],
+            ["journalctl --user -u beemcp.service -u beemcp-tunnel.service -f"],
         )
         self.assertNotIn("--no-pager", journal[0])
 
@@ -599,22 +594,22 @@ class StaticAcceptanceTests(unittest.TestCase):
         self.assertNotRegex(source.replace(" & ", ""), r"(?<![&>])&(?![&>])")
 
     def test_in_source_templates_have_no_hardcoded_user_paths(self) -> None:
-        for name in ("bee-dev-mcp.service.in", "bee-dev-mcp-tunnel.service.in"):
+        for name in ("beemcp.service.in", "beemcp-tunnel.service.in"):
             content = (ROOT / "ops/systemd" / name).read_text(encoding="utf-8")
             self.assertNotIn("/home/bee", content)
-            self.assertNotIn("bee-dev-mcp-test", content)
+            self.assertNotIn("beemcp-test", content)
             self.assertNotIn("127.0.0.1:8000", content)
             self.assertNotIn("127.0.0.1:8765", content)
-        mcp = (ROOT / "ops/systemd/bee-dev-mcp.service.in").read_text(encoding="utf-8")
+        mcp = (ROOT / "ops/systemd/beemcp.service.in").read_text(encoding="utf-8")
         self.assertIn("Type=simple", mcp)
         self.assertIn("server.py", mcp)
         self.assertNotIn("uv ", mcp)
         self.assertNotIn("[Install]", mcp)
-        tunnel = (ROOT / "ops/systemd/bee-dev-mcp-tunnel.service.in").read_text(
+        tunnel = (ROOT / "ops/systemd/beemcp-tunnel.service.in").read_text(
             encoding="utf-8"
         )
-        self.assertIn("After=bee-dev-mcp.service", tunnel)
-        self.assertIn("Requires=bee-dev-mcp.service", tunnel)
+        self.assertIn("After=beemcp.service", tunnel)
+        self.assertIn("Requires=beemcp.service", tunnel)
         self.assertNotIn("server.py", tunnel)
         self.assertNotIn("[Install]", tunnel + mcp)
 
@@ -653,14 +648,14 @@ class StaticAcceptanceTests(unittest.TestCase):
                 f"          - README.md\n",
                 encoding="utf-8",
             )
-            old_config = os.environ.get("BEE_MCP_CONFIG")
-            old_host = os.environ.get("BEE_DEV_MCP_HOST")
-            old_port = os.environ.get("BEE_DEV_MCP_PORT")
-            old_token = os.environ.get("BEE_DEV_MCP_GITHUB_TOKEN")
-            os.environ["BEE_MCP_CONFIG"] = str(config)
-            os.environ["BEE_DEV_MCP_HOST"] = "127.0.0.1"
-            os.environ["BEE_DEV_MCP_PORT"] = "8765"
-            os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
+            old_config = os.environ.get("BEEMCP_CONFIG")
+            old_host = os.environ.get("BEEMCP_HOST")
+            old_port = os.environ.get("BEEMCP_PORT")
+            old_token = os.environ.get("BEEMCP_GITHUB_TOKEN")
+            os.environ["BEEMCP_CONFIG"] = str(config)
+            os.environ["BEEMCP_HOST"] = "127.0.0.1"
+            os.environ["BEEMCP_PORT"] = "8765"
+            os.environ["BEEMCP_GITHUB_TOKEN"] = "github_test_token_placeholder"
             try:
                 spec = importlib.util.spec_from_file_location(
                     "tested_server",
@@ -682,21 +677,21 @@ class StaticAcceptanceTests(unittest.TestCase):
                     self.assertEqual(response.media_type, "text/plain")
             finally:
                 if old_config is None:
-                    os.environ.pop("BEE_MCP_CONFIG", None)
+                    os.environ.pop("BEEMCP_CONFIG", None)
                 else:
-                    os.environ["BEE_MCP_CONFIG"] = old_config
+                    os.environ["BEEMCP_CONFIG"] = old_config
                 if old_host is None:
-                    os.environ.pop("BEE_DEV_MCP_HOST", None)
+                    os.environ.pop("BEEMCP_HOST", None)
                 else:
-                    os.environ["BEE_DEV_MCP_HOST"] = old_host
+                    os.environ["BEEMCP_HOST"] = old_host
                 if old_port is None:
-                    os.environ.pop("BEE_DEV_MCP_PORT", None)
+                    os.environ.pop("BEEMCP_PORT", None)
                 else:
-                    os.environ["BEE_DEV_MCP_PORT"] = old_port
+                    os.environ["BEEMCP_PORT"] = old_port
                 if old_token is None:
-                    os.environ.pop("BEE_DEV_MCP_GITHUB_TOKEN", None)
+                    os.environ.pop("BEEMCP_GITHUB_TOKEN", None)
                 else:
-                    os.environ["BEE_DEV_MCP_GITHUB_TOKEN"] = old_token
+                    os.environ["BEEMCP_GITHUB_TOKEN"] = old_token
 
 
 class CheckMcpToolsTests(unittest.TestCase):
