@@ -5,6 +5,16 @@ limits:
   max_tree_entries: 4000
   max_search_results: 200
   max_review_page_chars: 60000
+  max_visual_file_bytes: 50000000
+  max_pdf_pages: 2000
+  max_render_pixels: 16000000
+  min_visual_dpi: 72
+  max_visual_dpi: 400
+  default_visual_dpi: 180
+  max_visual_image_bytes: 12000000
+  max_office_output_bytes: 50000000
+  render_timeout_seconds: 30
+  max_cache_bytes: 500000000
 
 deny_paths:
   - ".env"

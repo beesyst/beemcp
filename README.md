@@ -10,19 +10,13 @@ cd beemcp
 ./start.sh
 ```
 
-The first run creates `.env` from `.env.example`, sets mode `0600`, syncs
-dependencies, and validates the configuration. If required values are empty,
-it reports the full list. Fill only these values in repo-local `.env`:
+The first run creates `.env` from `.env.example`, sets mode `0600`, syncs dependencies, and validates the configuration. If required values are empty, it reports the full list. Fill only these values in repo-local `.env`:
 
 - `BEEMCP_TUNNEL_ID`
 - `CONTROL_PLANE_API_KEY`
 - `BEEMCP_GITHUB_TOKEN`
 
-Then run `./start.sh` again. It reconciles the runtime profile and units, applies
-`.env`, starts MCP, verifies its contract, and starts the tunnel. Manual
-`cp .env.example .env` and `chmod 600 .env` are not required. `./start.sh setup`
-remains available as an explicit setup command, but is not required for the
-normal first run.
+Then run `./start.sh` again. It reconciles the runtime profile and units, applies `.env`, starts MCP, verifies its contract, and starts the tunnel. Manual `cp .env.example .env` and `chmod 600 .env` are not required. `./start.sh setup` remains available as an explicit setup command, but is not required for the normal first run.
 
 Use `./start.sh doctor` after the stack is up.
 
@@ -59,13 +53,11 @@ Configured in `config/projects.yml`. Each project has A/B/C context modes:
 - **Mode B** — extends A with source code entry points and configuration.
 - **Mode C** — extends B with a bounded repository tree listing.
 
-Projects can also declare `related` projects whose files are loaded
-automatically (e.g. beeagent loads beeagent-rop ROADMAP).
+Projects can also declare `related` projects whose files are loaded automatically (e.g. beeagent loads beeagent-rop ROADMAP).
 
 ### Directory expansion in `files`
 
-`context_modes.<mode>.files` accepts relative paths to both files and
-directories. Directory entries are expanded recursively:
+`context_modes.<mode>.files` accepts relative paths to both files and directories. Directory entries are expanded recursively:
 
 - All nested text files (respecting deny patterns) are included.
 - Deduplicated — a file listed explicitly and also found under a directory
@@ -77,11 +69,7 @@ directories. Directory entries are expanded recursively:
 
 ## Worktree discovery
 
-Git worktrees are automatically detected. A worktree at
-`/home/bee/Pro/_worktrees/beeagent-pr123` becomes target `beeagent-pr123`.
-Each entry has the same metadata contract for main and linked worktrees:
-`target`, `project`, exact absolute normalized `path`, `branch`, `head`,
-`is_main`, and `dirty`.
+Git worktrees are automatically detected. A worktree at `/home/bee/Pro/_worktrees/beeagent-pr123` becomes target `beeagent-pr123`. Each entry has the same metadata contract for main and linked worktrees: `target`, `project`, exact absolute normalized `path`, `branch`, `head`, `is_main`, and `dirty`.
 
 Create a worktree manually:
 
@@ -101,7 +89,8 @@ Use the paginated protocol for all reviews:
 3. Verify target, branch, base_branch, **snapshot_id**
 4. **get_review_bundle_page**(cursor="") — paginated safe diff
 5. Repeat with **next_cursor** until **has_more=false**
-6. For each existing changed/untracked safe file, use **read_project_file** if needed
+6. For each existing changed/untracked text file, use **read_project_file**; for a
+   manifest item marked `readable_via: read_project_visual`, request the visual lazily
 7. REVIEW INCOMPLETE only after exhausting bundle pagination + per-file fallback
 
 ### Tool distinction
@@ -112,6 +101,7 @@ Use the paginated protocol for all reviews:
 | `get_review_manifest`    | Paginated Git inventory (concatenate content, parse JSON) |
 | `get_review_bundle_page` | Paginated safe diff (cursor protocol)                     |
 | `read_project_file`      | Per-file content (chunked)                                |
+| `read_project_visual`    | Native image/PDF/SVG/document page visual                 |
 
 ### Cursor / snapshot behavior
 
@@ -133,8 +123,7 @@ Use the paginated protocol for all reviews:
 
 ### Diff pagination (get_review_bundle_page)
 
-`get_review_bundle_page` uses segment-based streaming instead of pre-building
-the entire diff:
+`get_review_bundle_page` uses segment-based streaming instead of pre-building the entire diff:
 
 1. The diff is split into **committed**, **staged**, **unstaged**, and one
    deterministic segment per safe untracked file
@@ -158,8 +147,7 @@ the entire diff:
 
 ### list_worktrees path
 
-Each `list_worktrees` entry includes an exact absolute normalized `path`.
-Main and linked worktrees have the same response contract.
+Each `list_worktrees` entry includes an exact absolute normalized `path`. Main and linked worktrees have the same response contract.
 
 ### Manifest pagination
 
@@ -182,9 +170,15 @@ Manifest pagination uses the same `max_review_page_chars` boundary.
 - A note directing full inventory to `get_review_manifest(cursor="")` and full
   diff to `get_review_bundle_page(cursor="")`
 
-`max_diff_chars` does not limit the combined paginated diff. Every
-`get_review_bundle_page` response is bounded by `max_review_page_chars`; the
-final page always has `truncated=false`.
+`max_diff_chars` does not limit the combined paginated diff. Every `get_review_bundle_page` response is bounded by `max_review_page_chars`; the final page always has `truncated=false`.
+
+## Text and visual artifacts
+
+Use `read_project_file` for text/code, including CSV/TSV and SVG source. Text is decoded strictly (UTF BOMs or UTF-8); BeeMCP does not silently replace bad bytes. Use `read_project_visual` for PNG, JPEG, WEBP, SVG, and one requested page or normalized crop of a PDF. BMP/TIFF/GIF are validated then normalized to PNG; animated GIF uses frame 1. The result is native MCP image content for the client/model to interpret; BeeMCP does not OCR, reconstruct diagrams, or turn layout into a text substitute.
+
+PDF rendering is lazy: no entire document is rendered during context or review inventory. A response includes bounded page metadata and its supplementary text layer. Request a selected crop at a higher DPI when examining a formula or diagram. DOCX/XLSX/PPTX and ODT/ODS/ODP follow the same page path only when a local headless `soffice` (LibreOffice) executable is available; otherwise the tool returns `renderer_unavailable`. Arbitrary binaries, archives, databases, and executables remain unsupported and are never base64-dumped.
+
+Rendered PDF/SVG/office images are cached outside projects at `~/.cache/beemcp/` (or `BEEMCP_CACHE_DIR`), keyed by source content and render settings. Repository inventory uses Git and tracked search uses `git grep`, so mode-C trees and searches avoid opening every repository file.
 
 ## Example ChatGPT requests
 
@@ -221,8 +215,7 @@ final page always has `truncated=false`.
 
 ## GitHub context (`get_github_context`)
 
-BeeMCP can read GitHub Issues and Pull Requests from allowlisted
-repositories. This is a **bounded read-only** operation:
+BeeMCP can read GitHub Issues and Pull Requests from allowlisted repositories. This is a **bounded read-only** operation:
 
 - Only `get_github_context` — no write operations.
 - Only repositories listed in `github_repo` under each project in
@@ -262,8 +255,7 @@ Only repositories with `github_repo` are accessible.
 
 ### Example usage in ChatGPT
 
-The `FULL_APPROVED_ISSUE` and `CURRENT_PR_OR_NONE` fields accept GitHub URLs
-directly:
+The `FULL_APPROVED_ISSUE` and `CURRENT_PR_OR_NONE` fields accept GitHub URLs directly:
 
 ```text
 FULL_APPROVED_ISSUE:
@@ -283,19 +275,11 @@ ChatGPT calls `get_github_context` with the URL and receives:
 
 ### Response size limit
 
-The response respects `limits.max_context_chars`. The main Issue/PR body is
-never silently truncated. If the body alone exceeds the limit, the call fails
-with an error. Comments, reviews, and inline review comments may be omitted
-when the budget is exhausted, with corresponding `*_truncated` flags set.
+The response respects `limits.max_context_chars`. The main Issue/PR body is never silently truncated. If the body alone exceeds the limit, the call fails with an error. Comments, reviews, and inline review comments may be omitted when the budget is exhausted, with corresponding `*_truncated` flags set.
 
 ### Safe token passing
 
-The GitHub token is read from the repo-local `.env` and written into a
-separate generated file at `~/.config/beemcp/mcp.env` with permissions
-`0600`. This file contains only `BEEMCP_GITHUB_TOKEN` and is used by the
-MCP systemd unit via `EnvironmentFile=`. The tunnel service continues to use
-the full repo-local `.env`. Other secrets (`CONTROL_PLANE_API_KEY`, tunnel ID)
-are never exposed to the MCP process.
+The GitHub token is read from the repo-local `.env` and written into a separate generated file at `~/.config/beemcp/mcp.env` with permissions `0600`. This file contains only `BEEMCP_GITHUB_TOKEN` and is used by the MCP systemd unit via `EnvironmentFile=`. The tunnel service continues to use the full repo-local `.env`. Other secrets (`CONTROL_PLANE_API_KEY`, tunnel ID) are never exposed to the MCP process.
 
 ## How to add a new project
 
@@ -326,10 +310,7 @@ are never exposed to the MCP process.
   starting the tunnel, runs the tool contract check. If it fails, MCP is
   stopped and the stack does not come up, preventing a broken tunnel.
 
-The contract utility uses the real Streamable HTTP lifecycle: `initialize`,
-then `tools/list`. It runs against the local MCP URL before the tunnel starts.
-After changing a tool schema, restart both MCP and tunnel. If ChatGPT still
-shows an old schema, refresh or reconnect the BeeMCP app/connector.
+The contract utility uses the real Streamable HTTP lifecycle: `initialize`, then `tools/list`. It runs against the local MCP URL before the tunnel starts. After changing a tool schema, restart both MCP and tunnel. If ChatGPT still shows an old schema, refresh or reconnect the BeeMCP app/connector.
 
 ## Health endpoints
 
@@ -341,28 +322,25 @@ shows an old schema, refresh or reconnect the BeeMCP app/connector.
 
 ## Tool schema changed but ChatGPT still shows old tools
 
-After modifying tool declarations, the ChatGPT connector may cache stale
-schema. The local `doctor` checks **localhost and tunnel process state only**;
-it cannot verify the remote ChatGPT snapshot.
+After modifying tool declarations, the ChatGPT connector may cache stale schema. The local `doctor` checks **localhost and tunnel process state only**; it cannot verify the remote ChatGPT snapshot.
 
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains nine tools
+2. `./start.sh doctor` — confirm local tools/list contains ten tools
 3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
-7. Verify that `get_review_manifest`, `get_review_bundle_page`, and
-   `get_github_context` are available
+7. Verify that `get_review_manifest`, `get_review_bundle_page`,
+   `read_project_visual`, and `get_github_context` are available
 
 Important:
 
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with only eight tools is insufficient after the GitHub context
-  addition.
+- A schema with fewer than ten tools is stale.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual
@@ -385,15 +363,6 @@ cd /home/bee/Pro/beemcp
 ./start.sh setup
 ```
 
-`setup` verifies required programs and `.env`, runs `uv sync --frozen`,
-generates the tunnel-client profile (from `.env` values), generates a separate
-MCP environment file at `~/.config/beemcp/mcp.env` containing only
-`BEEMCP_GITHUB_TOKEN`, renders systemd units from portable
-`ops/systemd/*.service.in` templates, installs them, and reloads the user
-manager.
+`setup` verifies required programs and `.env`, runs `uv sync --frozen`, generates the tunnel-client profile (from `.env` values), generates a separate MCP environment file at `~/.config/beemcp/mcp.env` containing only `BEEMCP_GITHUB_TOKEN`, renders systemd units from portable `ops/systemd/*.service.in` templates, installs them, and reloads the user manager.
 
-The API key (`CONTROL_PLANE_API_KEY`) is never written into the tunnel profile
-(YAML uses `env:CONTROL_PLANE_API_KEY`), and never passed to the Python MCP
-server process (only host/port are set as Environment= directives and the
-isolated `mcp.env` file). The tunnel unit reads the full `.env` via
-`EnvironmentFile=`.
+The API key (`CONTROL_PLANE_API_KEY`) is never written into the tunnel profile (YAML uses `env:CONTROL_PLANE_API_KEY`), and never passed to the Python MCP server process (only host/port are set as Environment= directives and the isolated `mcp.env` file). The tunnel unit reads the full `.env` via `EnvironmentFile=`.

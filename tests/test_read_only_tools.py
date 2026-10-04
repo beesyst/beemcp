@@ -839,6 +839,39 @@ class ReadOnlyToolsTests(unittest.TestCase):
         sr = mod.search_project(target="search_val", query=max_len, mode="A")
         self.assertIn("results", sr)
 
+    def test_search_uses_compact_pathspecs_for_large_inventory_and_colon_filename(
+        self,
+    ) -> None:
+        repo = self._init_repo("search_compact")
+        (repo / "src").mkdir()
+        for index in range(300):
+            (repo / "src" / f"file-{index:04d}.txt").write_text(
+                "no match", encoding="utf-8"
+            )
+        (repo / "src" / "a:b.txt").write_text("NEEDLE", encoding="utf-8")
+        _run_git(["git", "add", "src"], repo)
+        _run_git(["git", "commit", "-m", "inventory"], repo)
+        config = self._make_project_yml(
+            "  search_compact:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        tree_roots:\n          - src\n"
+        )
+        mod = self._import_server(config)
+        original_run = mod.subprocess.run
+        grep_argv: list[str] = []
+
+        def recording_run(argv, *args, **kwargs):
+            if len(argv) > 2 and argv[0] == "git" and argv[2] == "grep":
+                grep_argv.extend(argv)
+            return original_run(argv, *args, **kwargs)
+
+        with patch.object(mod.subprocess, "run", side_effect=recording_run):
+            result = mod.search_project("search_compact", "NEEDLE", "A")
+        self.assertLess(len(grep_argv), 20)
+        self.assertEqual(result["results"][0]["path"], "src/a:b.txt")
+
     def test_invalid_project_target_mode_raises_error(self) -> None:
         repo = self._init_repo("valid_proj")
         self._commit_file(repo, "f.txt", "x")
@@ -962,8 +995,8 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(data["service"], "beemcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
-        self.assertEqual(data["tool_contract_version"], 3)
-        self.assertEqual(data["tool_count"], 9)
+        self.assertEqual(data["tool_contract_version"], 4)
+        self.assertEqual(data["tool_count"], 10)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -983,7 +1016,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("tunnel", serialized.lower())
         self.assertNotIn("env", serialized.lower())
 
-    def test_mcp_tools_list_contains_exactly_nine_expected(self) -> None:
+    def test_mcp_tools_list_contains_exactly_ten_expected(self) -> None:
         repo = self._init_repo("tools_count")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
@@ -1401,6 +1434,343 @@ class ReadOnlyToolsTests(unittest.TestCase):
         mod = self._import_server(self._chunk_config(repo, "rpf_bin"))
         with self.assertRaises(ValueError):
             mod.read_project_file(target="rpf_bin", path="data.bin")
+
+    def test_read_project_file_uses_strict_bom_aware_decoding(self) -> None:
+        repo = self._init_repo("strict_text")
+        (repo / "bom.txt").write_bytes(b"\xef\xbb\xbfhello\n")
+        (repo / "invalid.txt").write_bytes(b"hello\x80")
+        _run_git(["git", "add", "."], repo)
+        _run_git(["git", "commit", "-m", "text fixtures"], repo)
+        config = self._make_project_yml(
+            "  strict_text:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        result = mod.read_project_file("strict_text", "bom.txt")
+        self.assertEqual(result["content"], "hello\n")
+        self.assertEqual(result["encoding"], "utf-8-sig")
+        with self.assertRaises(ValueError):
+            mod.read_project_file("strict_text", "invalid.txt")
+
+    def test_large_text_reader_is_incremental_and_pageable(self) -> None:
+        repo = self._init_repo("incremental_text")
+        payload = "line-0000\n" + ("x" * 200_000) + "\nline-final\n"
+        (repo / "large.txt").write_text(payload, encoding="utf-8")
+        _run_git(["git", "add", "large.txt"], repo)
+        _run_git(["git", "commit", "-m", "large text"], repo)
+        config = self._chunk_config(repo, "incremental_text", max_context_chars=100)
+        mod = self._import_server(config)
+        with patch.object(
+            Path, "read_bytes", side_effect=AssertionError("whole-file read")
+        ):
+            first = mod.read_project_file("incremental_text", "large.txt")
+            second = mod.read_project_file(
+                "incremental_text",
+                "large.txt",
+                start_line=first["next_line"],
+                start_column=first["next_column"],
+            )
+        self.assertEqual(first["content"], "line-0000\n" + "x" * 90)
+        self.assertEqual(second["content"], "x" * 100)
+
+    def test_visual_png_is_native_image_content_and_manifest_is_lazy(self) -> None:
+        from PIL import Image
+
+        repo = self._init_repo("visual_png")
+        Image.new("RGB", (40, 30), "red").save(repo / "diagram.png")
+        Image.new("RGB", (40, 30), "red").save(repo / "photo.jpg")
+        Image.new("RGB", (40, 30), "red").save(repo / "web.webp")
+        self._commit_file(repo, "notes.txt", "base")
+        _run_git(["git", "add", "diagram.png"], repo)
+        _run_git(["git", "commit", "-m", "image"], repo)
+        _run_git(["git", "checkout", "-b", "visual-branch"], repo)
+        Image.new("RGB", (40, 30), "blue").save(repo / "diagram.png")
+        config = self._make_project_yml(
+            "  visual_png:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        cache_root = self.root / "visual-cache-png"
+        setattr(mod, "CACHE_ROOT", cache_root)
+        visual = mod.read_project_visual(target="visual_png", path="diagram.png")
+        self.assertEqual([part.type for part in visual], ["text", "image"])
+        self.assertEqual(visual[1].mimeType, "image/png")
+        metadata = json.loads(visual[0].text)
+        self.assertEqual((metadata["width"], metadata["height"]), (40, 30))
+        self.assertEqual(
+            mod.read_project_visual(target="visual_png", path="photo.jpg")[1].mimeType,
+            "image/jpeg",
+        )
+        self.assertEqual(
+            mod.read_project_visual(target="visual_png", path="web.webp")[1].mimeType,
+            "image/webp",
+        )
+        self.assertEqual((cache_root.stat().st_mode & 0o777), 0o700)
+        for cache_file in (cache_root / "renders").iterdir():
+            self.assertEqual(cache_file.stat().st_mode & 0o777, 0o600)
+        manifest = json.loads(mod.get_review_manifest("visual_png", "A")["content"])
+        self.assertIn(
+            {
+                "path": "diagram.png",
+                "kind": "visual",
+                "readable_via": "read_project_visual",
+            },
+            manifest["visual_files"],
+        )
+        self.assertNotIn("iVBOR", str(manifest))
+
+    def test_visual_pdf_page_crop_and_text_layer(self) -> None:
+        import pymupdf as fitz
+
+        repo = self._init_repo("visual_pdf")
+        document = fitz.open()
+        first = document.new_page(width=200, height=100)
+        first.insert_text((15, 20), "x + y -> z")
+        first.draw_line((20, 40), (180, 80))
+        second = document.new_page(width=300, height=100)
+        second.insert_text((15, 20), "second page")
+        document.save(repo / "math.pdf")
+        document.close()
+        _run_git(["git", "add", "math.pdf"], repo)
+        _run_git(["git", "commit", "-m", "pdf"], repo)
+        config = self._make_project_yml(
+            "  visual_pdf:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        cache_root = self.root / "visual-cache"
+        setattr(mod, "CACHE_ROOT", cache_root)
+        page = mod.read_project_visual("visual_pdf", "math.pdf", page=2)
+        page_meta = json.loads(page[0].text)
+        self.assertEqual(page[1].type, "image")
+        self.assertEqual(page_meta["page_count"], 2)
+        self.assertEqual(page_meta["page"], 2)
+        self.assertIn("second page", page_meta["text_layer"])
+        cached_page = mod.read_project_visual("visual_pdf", "math.pdf", page=2)
+        cached_metadata = json.loads(cached_page[0].text)
+        self.assertTrue(cached_metadata["cached"])
+        self.assertEqual(cached_metadata["page_count"], 2)
+        crop = mod.read_project_visual(
+            "visual_pdf",
+            "math.pdf",
+            page=1,
+            dpi=300,
+            region={"x0": 0.0, "y0": 0.0, "x1": 0.5, "y1": 0.5},
+        )
+        crop_meta = json.loads(crop[0].text)
+        self.assertEqual(crop_meta["dpi"], 300)
+        self.assertLess(crop_meta["width"], page_meta["width"])
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("visual_pdf", "math.pdf", page=3)
+        with self.assertRaises(ValueError):
+            mod.read_project_visual(
+                "visual_pdf",
+                "math.pdf",
+                region={"x0": 0.5, "y0": 0.0, "x1": 0.5, "y1": 1.0},
+            )
+        for cached_png in (cache_root / "renders").glob("*.png"):
+            cached_png.write_bytes(b"corrupt")
+        repaired = mod.read_project_visual("visual_pdf", "math.pdf", page=2)
+        self.assertFalse(json.loads(repaired[0].text)["cached"])
+        replacement = fitz.open()
+        replacement.new_page(width=200, height=100).insert_text((15, 20), "changed")
+        replacement.save(repo / "replacement.pdf")
+        replacement.close()
+        (repo / "replacement.pdf").replace(repo / "math.pdf")
+        invalidated = mod.read_project_visual("visual_pdf", "math.pdf", page=1)
+        self.assertFalse(json.loads(invalidated[0].text)["cached"])
+
+    def test_visual_rejects_fake_png_and_svg_preserves_source_text(self) -> None:
+        repo = self._init_repo("visual_safe")
+        (repo / "fake.png").write_bytes(b"\x89PNG\r\n\x1a\nnot-an-image")
+        (repo / "safe.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><rect width="4" height="3"/></svg>',
+            encoding="utf-8",
+        )
+        _run_git(["git", "add", "."], repo)
+        _run_git(["git", "commit", "-m", "fixtures"], repo)
+        config = self._make_project_yml(
+            "  visual_safe:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("visual_safe", "fake.png")
+        source = mod.read_project_file("visual_safe", "safe.svg")
+        self.assertIn("<svg", source["content"])
+        visual = mod.read_project_visual("visual_safe", "safe.svg")
+        self.assertEqual(visual[1].mimeType, "image/png")
+        (repo / ".env.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        outside = self.root / "outside.png"
+        outside.write_bytes(b"\x89PNG\r\n\x1a\n")
+        (repo / "escape.png").symlink_to(outside)
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("visual_safe", ".env.png")
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("visual_safe", "escape.png")
+
+    def test_svg_rejects_external_css_and_preserves_aspect_ratio(self) -> None:
+        repo = self._init_repo("svg_security")
+        (repo / "external.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://bad.invalid/a.css");</style></svg>',
+            encoding="utf-8",
+        )
+        (repo / "wide.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"><rect width="400" height="100"/></svg>',
+            encoding="utf-8",
+        )
+        _run_git(["git", "add", "."], repo)
+        _run_git(["git", "commit", "-m", "svg fixtures"], repo)
+        config = self._make_project_yml(
+            "  svg_security:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("svg_security", "external.svg")
+        result = mod.read_project_visual("svg_security", "wide.svg", dpi=96)
+        metadata = json.loads(result[0].text)
+        self.assertAlmostEqual(metadata["width"] / metadata["height"], 4.0, places=2)
+
+    def test_secondary_raster_formats_normalize_to_png_and_pixel_limit_applies(
+        self,
+    ) -> None:
+        from PIL import Image
+
+        repo = self._init_repo("secondary_raster")
+        Image.new("RGB", (12, 8), "red").save(repo / "image.bmp")
+        Image.new("RGB", (12, 8), "red").save(repo / "image.tiff")
+        Image.new("RGB", (12, 8), "red").save(repo / "image.gif")
+        Image.new("RGB", (100, 100), "red").save(repo / "large.png")
+        _run_git(["git", "add", "."], repo)
+        _run_git(["git", "commit", "-m", "raster fixtures"], repo)
+        config = self._make_project_yml(
+            "  secondary_raster:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        limits = getattr(mod, "LIMITS")
+        self.assertIsInstance(limits, dict)
+        assert isinstance(limits, dict)
+        limits["max_render_pixels"] = 1000
+        for path in ("image.bmp", "image.tiff", "image.gif"):
+            self.assertEqual(
+                mod.read_project_visual("secondary_raster", path)[1].mimeType,
+                "image/png",
+            )
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("secondary_raster", "large.png")
+
+    def test_office_renderer_unavailable_is_explicit(self) -> None:
+        repo = self._init_repo("office_unavailable")
+        (repo / "document.docx").write_bytes(b"PK\x03\x04minimal-office-fixture")
+        _run_git(["git", "add", "document.docx"], repo)
+        _run_git(["git", "commit", "-m", "office fixture"], repo)
+        config = self._make_project_yml(
+            "  office_unavailable:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        with patch.object(mod, "_soffice_path", return_value=None):
+            result = mod.read_project_visual("office_unavailable", "document.docx")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(json.loads(result[0].text)["status"], "renderer_unavailable")
+
+    def test_office_renderer_uses_temp_copy_and_minimal_environment(self) -> None:
+        repo = self._init_repo("office_temp_copy")
+        source = repo / "document.docx"
+        source.write_bytes(b"PK\x03\x04source-content")
+        _run_git(["git", "add", "document.docx"], repo)
+        _run_git(["git", "commit", "-m", "office fixture"], repo)
+        config = self._make_project_yml(
+            "  office_temp_copy:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        captured: dict[str, object] = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            captured["env"] = kwargs["env"]
+            copied = Path(argv[-1])
+            captured["temporary"] = copied.parent
+            self.assertNotEqual(copied, source)
+            self.assertEqual(copied.read_bytes(), source.read_bytes())
+            outdir = Path(argv[argv.index("--outdir") + 1])
+            (outdir / "source.pdf").write_bytes(b"pdf")
+            return subprocess.CompletedProcess(argv, 0)
+
+        with (
+            patch.object(mod, "_soffice_path", return_value="/usr/bin/soffice"),
+            patch.object(mod.subprocess, "run", side_effect=fake_run),
+            patch.object(mod, "_pdf_render", return_value=(b"png", {"page": 1})),
+        ):
+            data, metadata = mod._render_office(source, 1, 180, None)
+        self.assertEqual(data, b"png")
+        self.assertEqual(metadata["renderer"], "soffice")
+        captured_argv = captured["argv"]
+        self.assertIsInstance(captured_argv, list)
+        assert isinstance(captured_argv, list)
+        self.assertNotIn(str(source), captured_argv)
+        captured_temporary = captured["temporary"]
+        self.assertIsInstance(captured_temporary, Path)
+        assert isinstance(captured_temporary, Path)
+        self.assertFalse(captured_temporary.exists())
+        environment = captured["env"]
+        assert isinstance(environment, dict)
+        self.assertEqual(set(environment), {"HOME", "LANG", "PATH"})
+
+    def test_office_timeout_and_cache_root_inside_project_fail_closed(self) -> None:
+        repo = self._init_repo("office_timeout")
+        source = repo / "document.docx"
+        source.write_bytes(b"PK\x03\x04source-content")
+        _run_git(["git", "add", "document.docx"], repo)
+        _run_git(["git", "commit", "-m", "office fixture"], repo)
+        config = self._make_project_yml(
+            "  office_timeout:\n"
+            f"    source: {repo}\n"
+            "    base_branch: main\n"
+            "    context_modes:\n"
+            "      A:\n        files: []\n"
+        )
+        mod = self._import_server(config)
+        with (
+            patch.object(mod, "_soffice_path", return_value="/usr/bin/soffice"),
+            patch.object(
+                mod.subprocess,
+                "run",
+                side_effect=subprocess.TimeoutExpired("soffice", 1),
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                mod._render_office(source, 1, 180, None)
+        setattr(mod, "CACHE_ROOT", repo / "cache")
+        with self.assertRaises(ValueError):
+            mod.read_project_visual("office_timeout", "document.docx")
 
     def test_search_project_oversized_text_file(self) -> None:
         repo = self._init_repo("srch_ovr")
@@ -3555,13 +3925,14 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 9)
+        self.assertEqual(len(tools), 10)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
     def test_review_cursor_round_trip_uses_streamable_http_transport(self) -> None:
         import socket
 
+        from PIL import Image
         import uvicorn
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
@@ -3585,6 +3956,7 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 "TRANSPORT_CURSOR_TOKEN\n" + ("x" * 80 + "\n") * 20,
                 encoding="utf-8",
             )
+            Image.new("RGB", (8, 6), "green").save(repo / "visual.png")
             _run_git(["git", "add", "large.txt"], repo)
             _run_git(["git", "commit", "-m", "large diff"], repo)
             config = root / "projects.yml"
@@ -3719,6 +4091,30 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 self.assertIn(
                     "TRANSPORT_CURSOR_TOKEN",
                     str(first["content"]) + str(second["content"]),
+                )
+
+                async def call_visual() -> list[tuple[str, str | None]]:
+                    async with streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp"
+                    ) as streams:
+                        read_stream, write_stream, _ = streams
+                        async with ClientSession(read_stream, write_stream) as session:
+                            await session.initialize()
+                            result = await session.call_tool(
+                                "read_project_visual",
+                                arguments={
+                                    "target": "transport-proj",
+                                    "path": "visual.png",
+                                },
+                            )
+                    return [
+                        (item.type, getattr(item, "mimeType", None))
+                        for item in result.content
+                    ]
+
+                self.assertEqual(
+                    asyncio.run(call_visual()),
+                    [("text", None), ("image", "image/png")],
                 )
             finally:
                 if server is not None:

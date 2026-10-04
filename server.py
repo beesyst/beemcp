@@ -5,22 +5,25 @@ import binascii
 import codecs
 import fnmatch
 import hashlib
+import io
 import json
 import os
 import re
 import selectors
+import shutil
 import subprocess
 import tempfile
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
 import yaml
 from mcp.server.fastmcp import FastMCP
-from mcp.types import ToolAnnotations
+from mcp.types import ImageContent, TextContent, ToolAnnotations
 from starlette.responses import JSONResponse, PlainTextResponse
 
 from mcp_contract import (
@@ -30,6 +33,15 @@ from mcp_contract import (
 )
 
 HERE = Path(__file__).resolve().parent
+
+# Rendering is intentionally limited to faithful local visual transport.  No
+# OCR or semantic document conversion is performed in BeeMCP.
+try:
+    import cairosvg
+    import pymupdf as fitz
+    from PIL import Image, UnidentifiedImageError
+except ImportError as exc:  # pragma: no cover - lifecycle catches missing deps
+    raise RuntimeError("Visual artifact dependencies are not installed") from exc
 
 MCP_HOST = os.environ.get("BEEMCP_HOST")
 MCP_PORT_STR = os.environ.get("BEEMCP_PORT")
@@ -75,6 +87,9 @@ CONFIG_PATH = Path(
 if not CONFIG_PATH.is_absolute():
     CONFIG_PATH = HERE / CONFIG_PATH
 CONFIG_PATH = CONFIG_PATH.resolve()
+CACHE_ROOT = Path(
+    os.environ.get("BEEMCP_CACHE_DIR", Path.home() / ".cache" / "beemcp")
+).expanduser()
 READ_ONLY_TOOL_ANNOTATIONS = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
@@ -131,17 +146,42 @@ def load_config() -> dict[str, Any]:
     limits = raw.get("limits")
     if not isinstance(limits, dict):
         raise RuntimeError("projects.yml must contain limits mapping")
-    for key in (
+    required_limits = (
         "max_file_bytes",
         "max_diff_chars",
         "max_context_chars",
         "max_tree_entries",
         "max_search_results",
         "max_review_page_chars",
-    ):
+    )
+    visual_defaults = {
+        "max_visual_file_bytes": 50_000_000,
+        "max_pdf_pages": 2_000,
+        "max_render_pixels": 16_000_000,
+        "min_visual_dpi": 72,
+        "max_visual_dpi": 400,
+        "default_visual_dpi": 180,
+        "max_visual_image_bytes": 12_000_000,
+        "max_office_output_bytes": 50_000_000,
+        "render_timeout_seconds": 30,
+        "max_cache_bytes": 500_000_000,
+    }
+    # Compatibility defaults keep a previously valid project allowlist usable,
+    # while the shipped configuration makes every visual bound explicit.
+    for key, default in visual_defaults.items():
+        limits.setdefault(key, default)
+    for key in required_limits + tuple(visual_defaults):
         val = limits.get(key)
         if not isinstance(val, int) or val <= 0:
             raise RuntimeError(f"limits.{key} must be a positive integer, got {val!r}")
+    if limits["min_visual_dpi"] > limits["max_visual_dpi"]:
+        raise RuntimeError("limits.min_visual_dpi must not exceed max_visual_dpi")
+    if not (
+        limits["min_visual_dpi"]
+        <= limits["default_visual_dpi"]
+        <= limits["max_visual_dpi"]
+    ):
+        raise RuntimeError("limits.default_visual_dpi must be within visual DPI bounds")
 
     deny = raw.get("deny_paths")
     if not isinstance(deny, list) or not all(isinstance(d, str) for d in deny):
@@ -310,13 +350,15 @@ mcp = FastMCP(
         "3. Verify target, branch, base_branch, and snapshot_id\n"
         '4. get_review_bundle_page(cursor="") — get first page of paginated safe diff\n'
         "5. Repeat with next_cursor until has_more=false\n"
-        "6. For each existing changed/untracked safe file, use read_project_file "
-        "if needed (start_line=1, start_column=0; repeat until next_line is null)\n"
+        "6. For each existing changed/untracked text file, use read_project_file "
+        "if needed (start_line=1, start_column=0; repeat until next_line is null). "
+        "For files marked readable_via read_project_visual, request the needed page/image lazily.\n"
         "7. REVIEW INCOMPLETE is allowed only after exhausting bundle pagination "
         "and per-file read_project_file fallback\n\n"
-        "Files with reason 'oversized' or 'context_limit' in omitted_files CAN be "
-        "read via read_project_file. Files with reason 'denied', 'binary', 'broken', "
-        "or 'escaping' CANNOT be read.\n\n"
+        "Text files with reason 'oversized' or 'context_limit' in omitted_files CAN be "
+        "read via read_project_file. Visual and renderable_document files marked "
+        "readable_via read_project_visual are visual-only lazy reads. Files with reason "
+        "'denied', 'binary', 'broken', or 'escaping' CANNOT be semantically read.\n\n"
         "Available tools:\n"
         "- list_projects: show allowlisted projects and their context modes\n"
         "- list_worktrees: discover Git worktrees for a project\n"
@@ -330,6 +372,8 @@ mcp = FastMCP(
         "- read_project_file: read a single file by relative path (supports "
         "start_line and start_column for chunked reading; deleted files must be "
         "checked through paginated diff)\n"
+        "- read_project_visual: return a validated image, SVG, PDF page/crop, or supported "
+        "office document page as native image content\n"
         "- search_project: fixed-string search within configured boundaries\n"
         "- get_github_context: read-only GitHub Issue or Pull Request context "
         "for allowlisted repositories — supports URL validation, paginated "
@@ -622,6 +666,110 @@ def _resolve_target(target: str) -> dict[str, Any]:
     return candidates[0]
 
 
+TEXT_EXTENSIONS = {
+    ".txt",
+    ".md",
+    ".rst",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".xml",
+    ".html",
+    ".htm",
+    ".css",
+    ".sql",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".py",
+    ".rs",
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".c",
+    ".h",
+    ".cc",
+    ".cpp",
+    ".cxx",
+    ".go",
+    ".java",
+    ".lean",
+    ".log",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".properties",
+    ".gradle",
+    ".lock",
+}
+IMAGE_SIGNATURES = {
+    b"\x89PNG\r\n\x1a\n": ("png", "image/png"),
+    b"\xff\xd8\xff": ("jpeg", "image/jpeg"),
+    b"GIF87a": ("gif", "image/gif"),
+    b"GIF89a": ("gif", "image/gif"),
+    b"BM": ("bmp", "image/bmp"),
+    b"II*\x00": ("tiff", "image/tiff"),
+    b"MM\x00*": ("tiff", "image/tiff"),
+}
+OFFICE_EXTENSIONS = {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}
+
+
+def _detect_binary_artifact(header: bytes, rel: str) -> tuple[str, str | None]:
+    """Classify only formats BeeMCP can faithfully expose, by signature."""
+    for signature, (fmt, mime) in IMAGE_SIGNATURES.items():
+        if header.startswith(signature):
+            return "image", mime
+    if header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return "image", "image/webp"
+    if header.startswith(b"%PDF-"):
+        return "pdf", "application/pdf"
+    if Path(rel).suffix.lower() in OFFICE_EXTENSIONS and header.startswith(
+        b"PK\x03\x04"
+    ):
+        return "office", None
+    return "binary", None
+
+
+def _decode_text(data: bytes) -> tuple[str, str]:
+    """Decode text without replacement characters or lossy fallback."""
+    encodings: list[tuple[bytes, str]] = [
+        (codecs.BOM_UTF8, "utf-8-sig"),
+        (codecs.BOM_UTF32_LE, "utf-32"),
+        (codecs.BOM_UTF32_BE, "utf-32"),
+        (codecs.BOM_UTF16_LE, "utf-16"),
+        (codecs.BOM_UTF16_BE, "utf-16"),
+    ]
+    for bom, encoding in encodings:
+        if data.startswith(bom):
+            return data.decode(encoding, errors="strict"), encoding
+    return data.decode("utf-8", errors="strict"), "utf-8"
+
+
+def _open_strict_text(path: Path) -> tuple[io.TextIOWrapper, str]:
+    """Open a project text file for bounded, strict incremental decoding."""
+    stream = path.open("rb")
+    try:
+        prefix = stream.read(4)
+        stream.seek(0)
+        if prefix.startswith(codecs.BOM_UTF8):
+            encoding = "utf-8-sig"
+        elif prefix.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+            encoding = "utf-32"
+        elif prefix.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+            encoding = "utf-16"
+        else:
+            encoding = "utf-8"
+        return io.TextIOWrapper(stream, encoding=encoding, errors="strict"), encoding
+    except Exception:
+        stream.close()
+        raise
+
+
 def _classify_path_meta(target_root: Path, rel: str) -> dict[str, Any]:
     if _is_denied(rel):
         return {"status": "denied", "reason": rel}
@@ -647,10 +795,43 @@ def _classify_path_meta(target_root: Path, rel: str) -> dict[str, Any]:
     except OSError:
         return {"status": "broken", "reason": rel}
 
+    artifact_kind, mime = _detect_binary_artifact(header, rel)
+    if artifact_kind == "image":
+        return {
+            "status": "visual",
+            "kind": "visual",
+            "format": mime,
+            "resolved": resolved,
+            "size": resolved.stat().st_size,
+        }
+    if artifact_kind in {"pdf", "office"}:
+        return {
+            "status": "renderable",
+            "kind": "renderable_document",
+            "format": artifact_kind,
+            "resolved": resolved,
+            "size": resolved.stat().st_size,
+        }
     if b"\x00" in header:
         return {"status": "binary", "reason": rel}
 
-    return {"status": "safe", "resolved": resolved, "size": resolved.stat().st_size}
+    suffix = Path(rel).suffix.lower()
+    # SVG stays native readable XML and also has a safe visual render path.
+    if suffix == ".svg" or header.lstrip().lower().startswith(b"<svg"):
+        return {
+            "status": "safe",
+            "kind": "svg",
+            "format": "image/svg+xml",
+            "resolved": resolved,
+            "size": resolved.stat().st_size,
+        }
+    return {
+        "status": "safe",
+        "kind": "text",
+        "format": suffix.lstrip(".") or "text",
+        "resolved": resolved,
+        "size": resolved.stat().st_size,
+    }
 
 
 def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
@@ -663,10 +844,17 @@ def _classify_path(target_root: Path, rel: str) -> dict[str, Any]:
 
     try:
         data = meta["resolved"].read_bytes()
+        content, encoding = _decode_text(data)
+    except UnicodeDecodeError:
+        return {"status": "unsupported_encoding", "reason": rel}
     except OSError:
         return {"status": "broken", "reason": rel}
-
-    return {"status": "safe", "content": data.decode("utf-8", errors="replace")}
+    return {
+        "status": "safe",
+        "kind": meta["kind"],
+        "encoding": encoding,
+        "content": content,
+    }
 
 
 def _safe_read_file_chunked(
@@ -681,6 +869,12 @@ def _safe_read_file_chunked(
         raise ValueError(f"start_column must be >= 0, got {start_column}")
 
     meta = _classify_path_meta(target_root, raw_path)
+    if meta["status"] in {"visual", "renderable"}:
+        return {
+            "path": raw_path,
+            "kind": meta["kind"],
+            "readable_via": "read_project_visual",
+        }
     if meta["status"] != "safe":
         raise ValueError(f"Cannot read {raw_path}: {meta['status']}")
 
@@ -692,52 +886,52 @@ def _safe_read_file_chunked(
     cur_line = 1
     cur_col = 0
     end_line: int | None = None
+    try:
+        stream, encoding = _open_strict_text(resolved)
+        with stream:
+            while cur_line < start_line:
+                chunk = stream.readline(max_chars)
+                if not chunk:
+                    return {
+                        "path": raw_path,
+                        "start_line": start_line,
+                        "start_column": start_column,
+                        "end_line": None,
+                        "next_line": None,
+                        "next_column": None,
+                        "content": "",
+                        "encoding": encoding,
+                    }
+                if chunk.endswith("\n"):
+                    cur_line += 1
 
-    with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-        while cur_line < start_line:
-            chunk = f.readline(max_chars)
-            if not chunk:
-                return {
-                    "path": raw_path,
-                    "start_line": start_line,
-                    "start_column": start_column,
-                    "end_line": None,
-                    "next_line": None,
-                    "next_column": None,
-                    "content": "",
-                }
-            if chunk.endswith("\n"):
-                cur_line += 1
+            remaining = start_column
+            while remaining > 0:
+                chunk = stream.readline(min(max_chars, remaining))
+                if not chunk or chunk.endswith("\n"):
+                    raise ValueError(
+                        f"start_column exceeds line {start_line}: {start_column}"
+                    )
+                remaining -= len(chunk)
+            cur_col = start_column
 
-        remaining = start_column
-        while remaining > 0:
-            chunk = f.readline(min(max_chars, remaining))
-            if not chunk:
-                raise ValueError(
-                    f"start_column exceeds line {start_line}: {start_column}"
-                )
-            remaining -= len(chunk)
-            if chunk.endswith("\n"):
-                raise ValueError(
-                    f"start_column exceeds line {start_line}: {start_column}"
-                )
-
-        cur_col = start_column
-
-        while total < max_chars:
-            chunk = f.readline(max_chars - total)
-            if not chunk:
-                break
-            parts.append(chunk)
-            total += len(chunk)
-            end_line = cur_line
-            if chunk.endswith("\n"):
-                cur_line += 1
-                cur_col = 0
-            else:
-                cur_col += len(chunk)
-
-        has_more = bool(f.read(1))
+            while total < max_chars:
+                chunk = stream.readline(max_chars - total)
+                if not chunk:
+                    break
+                parts.append(chunk)
+                total += len(chunk)
+                end_line = cur_line
+                if chunk.endswith("\n"):
+                    cur_line += 1
+                    cur_col = 0
+                else:
+                    cur_col += len(chunk)
+            has_more = bool(stream.read(1))
+    except UnicodeDecodeError as error:
+        raise ValueError(f"Cannot read {raw_path}: unsupported_encoding") from error
+    except OSError as error:
+        raise ValueError(f"Cannot read {raw_path}: broken") from error
 
     return {
         "path": raw_path,
@@ -747,6 +941,7 @@ def _safe_read_file_chunked(
         "next_line": cur_line if has_more else None,
         "next_column": cur_col if has_more else None,
         "content": "".join(parts),
+        "encoding": encoding,
     }
 
 
@@ -805,29 +1000,34 @@ def _expand_mode_file_entries(
     max_entries = LIMITS["max_tree_entries"]
     recursive_count = 0
 
-    for dir_entry, resolved_dir in dir_entries:
-        for dirpath, dirnames, filenames in os.walk(resolved_dir):
-            rel_dir = Path(dirpath).relative_to(target_root)
-            dirnames[:] = [
-                name
-                for name in sorted(dirnames)
-                if not is_denied_directory(str(rel_dir / name))
-            ]
-            filenames.sort()
-
-            for filename in filenames:
-                rel = str(rel_dir / filename)
-
-                if _is_denied(rel) or rel in seen:
-                    continue
-
-                if recursive_count >= max_entries:
-                    truncated_roots.append(dir_entry)
-                    return expanded, truncated_roots
-
-                seen.add(rel)
-                expanded.append(rel)
-                recursive_count += 1
+    for dir_entry, _ in dir_entries:
+        # Git is the canonical repository inventory.  This includes safe
+        # untracked files without opening or recursively walking ignored trees.
+        output = _run_git_bytes(
+            [
+                "git",
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+                "--",
+                dir_entry,
+            ],
+            target_root,
+        )
+        for raw_rel in output.split(b"\0"):
+            if not raw_rel:
+                continue
+            rel = os.fsdecode(raw_rel)
+            if _is_denied(rel) or rel in seen or not (target_root / rel).exists():
+                continue
+            if recursive_count >= max_entries:
+                truncated_roots.append(dir_entry)
+                return expanded, truncated_roots
+            seen.add(rel)
+            expanded.append(rel)
+            recursive_count += 1
 
     return expanded, truncated_roots
 
@@ -868,9 +1068,16 @@ def _read_mode_files(
             continue
         meta = _classify_path_meta(target_root, rel)
         if meta["status"] != "safe":
-            omitted.append(
-                {"target": target, "path": rel, "reason": meta.get("status", "unknown")}
-            )
+            item = {
+                "target": target,
+                "path": rel,
+                "reason": meta.get("status", "unknown"),
+            }
+            if meta["status"] in {"visual", "renderable"}:
+                item.update(
+                    {"kind": meta["kind"], "readable_via": "read_project_visual"}
+                )
+            omitted.append(item)
             continue
         if meta["size"] > LIMITS["max_file_bytes"]:
             omitted.append({"target": target, "path": rel, "reason": "oversized"})
@@ -879,6 +1086,9 @@ def _read_mode_files(
             omitted.append({"target": target, "path": rel, "reason": "context_limit"})
             continue
         result = _classify_path(target_root, rel)
+        if result["status"] != "safe":
+            omitted.append({"target": target, "path": rel, "reason": result["status"]})
+            continue
         contents[rel] = result["content"]
         remaining -= len(result["content"])
     return contents, omitted
@@ -903,13 +1113,16 @@ def _read_related(
                 continue
             meta = _classify_path_meta(rsource, rf)
             if meta["status"] != "safe":
-                omitted.append(
-                    {
-                        "target": rproj,
-                        "path": rf,
-                        "reason": meta.get("status", "unknown"),
-                    }
-                )
+                item = {
+                    "target": rproj,
+                    "path": rf,
+                    "reason": meta.get("status", "unknown"),
+                }
+                if meta["status"] in {"visual", "renderable"}:
+                    item.update(
+                        {"kind": meta["kind"], "readable_via": "read_project_visual"}
+                    )
+                omitted.append(item)
                 continue
             if meta["size"] > LIMITS["max_file_bytes"]:
                 omitted.append({"target": rproj, "path": rf, "reason": "oversized"})
@@ -919,6 +1132,11 @@ def _read_related(
                 continue
             key = f"{rproj}/{rf}"
             classification = _classify_path(rsource, rf)
+            if classification["status"] != "safe":
+                omitted.append(
+                    {"target": rproj, "path": rf, "reason": classification["status"]}
+                )
+                continue
             result[key] = classification["content"]
             remaining -= len(classification["content"])
     return result, omitted
@@ -927,23 +1145,21 @@ def _read_related(
 def _build_repository_tree(
     target_root: Path, tree_roots: list[str], max_entries: int
 ) -> list[str]:
-    entries: list[str] = []
-    for root in tree_roots:
-        root_path = target_root / root
-        if not root_path.is_dir():
-            continue
-        for dirpath, dirnames, filenames in os.walk(root_path):
-            dirnames.sort()
-            filenames.sort()
-            rel_dir = Path(dirpath).relative_to(target_root)
-            for f in filenames:
-                rel = str(rel_dir / f)
-                if _is_denied(rel):
-                    continue
-                entries.append(rel)
-                if len(entries) >= max_entries:
-                    return entries
-    return entries
+    if not tree_roots:
+        return []
+    output = _run_git_bytes(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--"]
+        + tree_roots,
+        target_root,
+    )
+    entries = sorted(
+        os.fsdecode(item)
+        for item in output.split(b"\0")
+        if item
+        and not _is_denied(os.fsdecode(item))
+        and (target_root / os.fsdecode(item)).exists()
+    )
+    return entries[:max_entries]
 
 
 @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
@@ -1236,6 +1452,7 @@ def _git_inventory(target: str, mode: str) -> dict[str, Any]:
     safe_paths: set[str] = set()
     redacted_paths: list[str] = list(deleted_denied)
     omitted_files: list[dict[str, str]] = []
+    visual_files: list[dict[str, str]] = []
 
     for rel in sorted(all_changed):
         if rel in deleted_files and not os.path.lexists(target_root / rel):
@@ -1253,6 +1470,22 @@ def _git_inventory(target: str, mode: str) -> dict[str, Any]:
             redacted_paths.append(rel)
         elif st == "escaping":
             redacted_paths.append(f"{rel} [escaping symlink]")
+        elif st in {"visual", "renderable"}:
+            item = {
+                "target": target,
+                "path": rel,
+                "reason": st,
+                "kind": meta["kind"],
+                "readable_via": "read_project_visual",
+            }
+            omitted_files.append(item)
+            visual_files.append(
+                {
+                    "path": rel,
+                    "kind": meta["kind"],
+                    "readable_via": "read_project_visual",
+                }
+            )
         elif st in ("binary",):
             omitted_files.append({"target": target, "path": rel, "reason": st})
         else:
@@ -1288,7 +1521,7 @@ def _git_inventory(target: str, mode: str) -> dict[str, Any]:
             if src is None:
                 continue
             cls = _classify_git_blob(target_root, f"{src}:{rel}")
-            if cls["status"] == "oversized" or cls["status"] == "binary":
+            if cls["status"] in {"oversized", "binary", "visual", "renderable"}:
                 safe_paths.discard(rel)
                 omitted_files.append(
                     {"target": target, "path": rel, "reason": cls["status"]}
@@ -1377,6 +1610,7 @@ def _git_inventory(target: str, mode: str) -> dict[str, Any]:
         "safe_paths": safe_paths,
         "redacted_paths": redacted_paths,
         "omitted_files": omitted_files,
+        "visual_files": sorted(visual_files, key=lambda item: item["path"]),
         "safe_untracked": safe_untracked,
         "diff_pathspec": diff_pathspec,
         "committed": committed,
@@ -1443,27 +1677,20 @@ def _stream_diff_segments(inv: dict[str, Any]) -> Generator[tuple[str, str]]:
     for seg_name, cmd in segment_specs:
         git_stream = _stream_git_stdout(cmd, target_root)
         try:
-            for chunk in codecs.iterdecode(git_stream, "utf-8", errors="replace"):
+            for chunk in codecs.iterdecode(git_stream, "utf-8", errors="strict"):
                 if chunk:
                     yield seg_name, chunk
         finally:
             git_stream.close()
 
     for index, f in enumerate(sorted(safe_untracked)):
-        cls = _classify_path_meta(target_root, f)
-        if cls["status"] != "safe" or cls["size"] > LIMITS["max_file_bytes"]:
+        cls = _classify_path(target_root, f)
+        if cls["status"] != "safe":
             continue
         prefix = f"diff --git a/{f} b/{f}\nnew file mode 100644\n--- /dev/null\n+++ b/{f}\n@@ new file @@\n"
         seg_name = f"untracked:{index}"
         yield seg_name, prefix
-        with open(cls["resolved"], "rb") as file_stream:
-            for chunk in codecs.iterdecode(
-                iter(lambda: file_stream.read(65536), b""),
-                "utf-8",
-                errors="replace",
-            ):
-                if chunk:
-                    yield seg_name, chunk
+        yield seg_name, cls["content"]
         yield seg_name, "\n"
 
 
@@ -1599,7 +1826,7 @@ def _build_review_diff(inv: dict[str, Any], *, truncate: bool) -> tuple[str, boo
                 for text in codecs.iterdecode(
                     stream,
                     "utf-8",
-                    errors="replace",
+                    errors="strict",
                 ):
                     if not wrote_content:
                         emit_sep()
@@ -1738,13 +1965,18 @@ def _classify_git_blob(target_root: Path, object_spec: str) -> dict[str, Any]:
     except RuntimeError:
         return {"status": "broken", "reason": object_spec}
 
+    artifact_kind, _ = _detect_binary_artifact(blob[:8192], object_spec)
+    if artifact_kind == "image":
+        return {"status": "visual", "reason": object_spec}
+    if artifact_kind in {"pdf", "office"}:
+        return {"status": "renderable", "reason": object_spec}
     if b"\x00" in blob[:8192]:
         return {"status": "binary", "reason": object_spec}
-
-    return {
-        "status": "safe",
-        "content": blob.decode("utf-8", errors="replace"),
-    }
+    try:
+        content, encoding = _decode_text(blob)
+    except UnicodeDecodeError:
+        return {"status": "unsupported_encoding", "reason": object_spec}
+    return {"status": "safe", "content": content, "encoding": encoding}
 
 
 def _classify_deleted_blob(
@@ -1774,6 +2006,7 @@ def _build_manifest_dict(inv: dict[str, Any]) -> dict[str, Any]:
         "changed_files": inv["changed_files"],
         "redacted_paths": inv["redacted_paths"],
         "omitted_files": inv["omitted_files"],
+        "visual_files": inv["visual_files"],
     }
 
 
@@ -2040,6 +2273,476 @@ def read_project_file(
     return {"target": target, **chunk}
 
 
+def _validate_region(
+    region: dict[str, float] | None,
+) -> tuple[float, float, float, float] | None:
+    if region is None:
+        return None
+    if set(region) != {"x0", "y0", "x1", "y1"}:
+        raise ValueError("region must contain exactly x0, y0, x1, y1")
+    values: list[float] = []
+    for key in ("x0", "y0", "x1", "y1"):
+        value = region[key]
+        if type(value) not in {int, float} or not 0 <= float(value) <= 1:
+            raise ValueError("region coordinates must be numbers from 0 through 1")
+        values.append(float(value))
+    x0, y0, x1, y1 = values
+    if x0 >= x1 or y0 >= y1:
+        raise ValueError("region must have x0 < x1 and y0 < y1")
+    return x0, y0, x1, y1
+
+
+def _source_digest(path: Path, limit: int) -> str:
+    if path.stat().st_size > limit:
+        raise ValueError(f"Visual source exceeds max_visual_file_bytes ({limit})")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _cache_path(key: str) -> Path:
+    return CACHE_ROOT / "renders" / f"{key}.png"
+
+
+def _cache_metadata_path(key: str) -> Path:
+    return CACHE_ROOT / "renders" / f"{key}.json"
+
+
+def _cache_root_is_safe() -> bool:
+    cache_root = CACHE_ROOT.resolve()
+    for project, config in PROJECTS.items():
+        try:
+            source = _project_source(project, config)
+        except RuntimeError:
+            continue
+        if cache_root.is_relative_to(source):
+            return False
+    return True
+
+
+def _prepare_cache_directory() -> None:
+    if not _cache_root_is_safe():
+        raise ValueError("BEEMCP_CACHE_DIR must not be inside an allowlisted project")
+    CACHE_ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    CACHE_ROOT.chmod(0o700)
+    renders = CACHE_ROOT / "renders"
+    renders.mkdir(mode=0o700, exist_ok=True)
+    renders.chmod(0o700)
+
+
+def _atomic_cache_write(path: Path, data: bytes) -> None:
+    temporary: Path | None = None
+    try:
+        _prepare_cache_directory()
+        with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            temporary.chmod(0o600)
+            stream.write(data)
+        os.replace(temporary, path)
+        temporary = None
+        path.chmod(0o600)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _read_render_cache(key: str) -> tuple[bytes, dict[str, Any]] | None:
+    try:
+        image_path = _cache_path(key)
+        metadata_path = _cache_metadata_path(key)
+        if (
+            CACHE_ROOT.stat().st_mode & 0o777 != 0o700
+            or image_path.parent.stat().st_mode & 0o777 != 0o700
+            or image_path.stat().st_mode & 0o777 != 0o600
+            or metadata_path.stat().st_mode & 0o777 != 0o600
+        ):
+            return None
+        data = image_path.read_bytes()
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
+    except ValueError, json.JSONDecodeError:
+        return None
+    if (
+        not isinstance(metadata, dict)
+        or not 0 < len(data) <= LIMITS["max_visual_image_bytes"]
+    ):
+        return None
+    return data, metadata
+
+
+def _prune_render_cache() -> None:
+    try:
+        entries = [
+            entry for entry in (CACHE_ROOT / "renders").glob("*.png") if entry.is_file()
+        ]
+        total = sum(entry.stat().st_size for entry in entries)
+        for entry in sorted(entries, key=lambda item: item.stat().st_mtime):
+            if total <= LIMITS["max_cache_bytes"]:
+                break
+            size = entry.stat().st_size
+            entry.unlink(missing_ok=True)
+            entry.with_suffix(".json").unlink(missing_ok=True)
+            total -= size
+    except OSError:
+        pass  # Cache is an optimization, never a read capability dependency.
+
+
+def _write_render_cache(key: str, data: bytes, metadata: dict[str, Any]) -> None:
+    if len(data) > LIMITS["max_visual_image_bytes"]:
+        return
+    try:
+        _atomic_cache_write(_cache_path(key), data)
+        _atomic_cache_write(
+            _cache_metadata_path(key),
+            json.dumps(metadata, ensure_ascii=True, sort_keys=True).encode("utf-8"),
+        )
+        _prune_render_cache()
+    except OSError:
+        pass
+
+
+def _bound_dimensions(width: int, height: int) -> tuple[int, int]:
+    if width <= 0 or height <= 0:
+        raise ValueError("Renderer produced invalid image dimensions")
+    pixels = width * height
+    if pixels <= LIMITS["max_render_pixels"]:
+        return width, height
+    scale = (LIMITS["max_render_pixels"] / pixels) ** 0.5
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def _image_content(
+    metadata: dict[str, Any], data: bytes, mime: str
+) -> list[TextContent | ImageContent]:
+    if len(data) > LIMITS["max_visual_image_bytes"]:
+        raise ValueError("Rendered image exceeds max_visual_image_bytes")
+    return [
+        TextContent(
+            type="text", text=json.dumps(metadata, ensure_ascii=True, sort_keys=True)
+        ),
+        ImageContent(
+            type="image", data=base64.b64encode(data).decode("ascii"), mimeType=mime
+        ),
+    ]
+
+
+def _render_raster(
+    path: Path, source_mime: str
+) -> tuple[bytes, str, int, int, dict[str, Any]]:
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            width, height = image.size
+            if (
+                width <= 0
+                or height <= 0
+                or width * height > LIMITS["max_render_pixels"]
+            ):
+                raise ValueError("Raster image exceeds max_render_pixels")
+            source_size = path.stat().st_size
+            extra: dict[str, Any] = {}
+            animated = getattr(image, "n_frames", 1) > 1
+            if animated:
+                image.seek(0)
+                extra["frame"] = 1
+            if (
+                source_mime in {"image/png", "image/jpeg", "image/webp"}
+                and not animated
+                and source_size <= LIMITS["max_visual_image_bytes"]
+            ):
+                return path.read_bytes(), source_mime, width, height, extra
+            image.seek(0)
+            image.thumbnail((width, height), Image.Resampling.LANCZOS)
+            output = io.BytesIO()
+            image.convert("RGB").save(output, format="PNG", optimize=True)
+            return output.getvalue(), "image/png", image.width, image.height, extra
+    except (
+        UnidentifiedImageError,
+        Image.DecompressionBombError,
+        OSError,
+        ValueError,
+    ) as error:
+        raise ValueError("Invalid or unsafe raster image") from error
+
+
+def _pdf_render(
+    path: Path,
+    page_number: int,
+    dpi: int,
+    region: tuple[float, float, float, float] | None,
+) -> tuple[bytes, dict[str, Any]]:
+    try:
+        document = fitz.open(path)
+    except Exception as error:
+        raise ValueError("Malformed or unsupported PDF") from error
+    try:
+        if document.needs_pass:
+            raise ValueError("Encrypted PDF is unsupported")
+        page_count = document.page_count
+        if page_count < 1 or page_count > LIMITS["max_pdf_pages"]:
+            raise ValueError("PDF page count exceeds max_pdf_pages")
+        if not 1 <= page_number <= page_count:
+            raise ValueError(f"page must be from 1 through {page_count}")
+        page = document.load_page(page_number - 1)
+        clip = page.rect
+        if region is not None:
+            x0, y0, x1, y1 = region
+            clip = fitz.Rect(
+                page.rect.x0 + page.rect.width * x0,
+                page.rect.y0 + page.rect.height * y0,
+                page.rect.x0 + page.rect.width * x1,
+                page.rect.y0 + page.rect.height * y1,
+            )
+        effective_dpi = dpi
+        pixels = max(1, int(clip.width * dpi / 72)) * max(
+            1, int(clip.height * dpi / 72)
+        )
+        if pixels > LIMITS["max_render_pixels"]:
+            effective_dpi = int(dpi * (LIMITS["max_render_pixels"] / pixels) ** 0.5)
+            if effective_dpi < LIMITS["min_visual_dpi"]:
+                raise ValueError("PDF render exceeds max_render_pixels at minimum DPI")
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(effective_dpi / 72, effective_dpi / 72),
+            clip=clip,
+            alpha=False,
+        )
+        width, height = _bound_dimensions(pixmap.width, pixmap.height)
+        if (width, height) != (pixmap.width, pixmap.height):
+            raise ValueError("PDF render exceeds max_render_pixels")
+        text_layer = page.get_text("text")[: min(LIMITS["max_context_chars"], 12000)]
+        return pixmap.tobytes("png"), {
+            "page": page_number,
+            "page_count": page_count,
+            "width": width,
+            "height": height,
+            "dpi": effective_dpi,
+            "crop": region,
+            "text_layer": text_layer,
+        }
+    finally:
+        document.close()
+
+
+def _render_svg(path: Path, dpi: int) -> tuple[bytes, dict[str, Any]]:
+    try:
+        source = path.read_bytes()
+        lowered = source.lower()
+        if (
+            b"<!doctype" in lowered
+            or b"<!entity" in lowered
+            or b"<script" in lowered
+            or b"<style" in lowered
+            or b"style=" in lowered
+            or b"@import" in lowered
+            or b"url(" in lowered
+        ):
+            raise ValueError("SVG external entities and scripts are unsupported")
+        for reference in re.findall(
+            rb"(?:href|xlink:href|src)\s*=\s*['\"]([^'\"]*)", lowered
+        ):
+            if reference and not reference.startswith((b"#", b"data:")):
+                raise ValueError("SVG external references are unsupported")
+        root = ET.fromstring(source)
+        view_box = root.attrib.get("viewBox", "").replace(",", " ").split()
+
+        def dimension(name: str) -> float | None:
+            value = root.attrib.get(name)
+            if value is None:
+                return None
+            match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)(?:px)?\s*", value)
+            return float(match.group(1)) if match else None
+
+        natural_width, natural_height = dimension("width"), dimension("height")
+        if len(view_box) == 4:
+            try:
+                view_width, view_height = float(view_box[2]), float(view_box[3])
+            except ValueError as error:
+                raise ValueError("Malformed SVG viewBox") from error
+            if view_width <= 0 or view_height <= 0:
+                raise ValueError("Malformed SVG viewBox")
+            natural_width = natural_width or view_width
+            natural_height = natural_height or view_height
+        natural_width = natural_width or 300.0
+        natural_height = natural_height or 150.0
+        if natural_width <= 0 or natural_height <= 0:
+            raise ValueError("Malformed SVG dimensions")
+        scale = dpi / 96
+        width, height = _bound_dimensions(
+            max(1, round(natural_width * scale)), max(1, round(natural_height * scale))
+        )
+        rendered = cairosvg.svg2png(
+            bytestring=source,
+            output_width=width,
+            output_height=height,
+            unsafe=False,
+        )
+        if not isinstance(rendered, bytes):
+            raise ValueError("SVG renderer returned no image data")
+        return rendered, {"width": width, "height": height, "dpi": dpi, "crop": None}
+    except Exception as error:
+        raise ValueError("Malformed or unsafe SVG") from error
+
+
+def _soffice_path() -> str | None:
+    executable = shutil.which("soffice")
+    return executable if executable and Path(executable).name == "soffice" else None
+
+
+def _render_office(
+    path: Path, page: int, dpi: int, region: tuple[float, float, float, float] | None
+) -> tuple[bytes, dict[str, Any]]:
+    executable = _soffice_path()
+    if executable is None:
+        raise RuntimeError("renderer_unavailable")
+    with tempfile.TemporaryDirectory(prefix="beemcp-office-") as temp:
+        temporary = Path(temp)
+        outdir = temporary / "out"
+        profile = temporary / "profile"
+        source_copy = temporary / f"source{path.suffix.lower()}"
+        outdir.mkdir()
+        profile.mkdir()
+        shutil.copyfile(path, source_copy)
+        environment = {"HOME": str(profile), "LANG": "C", "PATH": os.defpath}
+        try:
+            completed = subprocess.run(
+                [
+                    executable,
+                    "--headless",
+                    "--nologo",
+                    "--nodefault",
+                    "--nofirststartwizard",
+                    f"-env:UserInstallation={profile.as_uri()}",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(outdir),
+                    str(source_copy),
+                ],
+                cwd=temporary,
+                env=environment,
+                capture_output=True,
+                check=False,
+                timeout=LIMITS["render_timeout_seconds"],
+            )
+        except subprocess.TimeoutExpired as error:
+            raise ValueError("Office renderer timed out") from error
+        if completed.returncode != 0:
+            raise ValueError("Office renderer failed")
+        outputs = list(outdir.glob("*.pdf"))
+        if (
+            len(outputs) != 1
+            or outputs[0].stat().st_size > LIMITS["max_office_output_bytes"]
+        ):
+            raise ValueError("Office renderer did not produce a bounded PDF")
+        data, metadata = _pdf_render(outputs[0], page, dpi, region)
+        metadata["renderer"] = "soffice"
+        return data, metadata
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def read_project_visual(
+    target: str,
+    path: str,
+    page: int = 1,
+    dpi: int = 180,
+    region: dict[str, float] | None = None,
+) -> list[TextContent | ImageContent]:
+    """Read one validated visual artifact as native MCP ImageContent."""
+    _check_relative_path(path, "path")
+    if type(page) is not int or page < 1:
+        raise ValueError("page must be a positive integer")
+    if (
+        type(dpi) is not int
+        or not LIMITS["min_visual_dpi"] <= dpi <= LIMITS["max_visual_dpi"]
+    ):
+        raise ValueError("dpi is outside configured visual DPI bounds")
+    crop = _validate_region(region)
+    resolved = _resolve_target(target)
+    meta = _classify_path_meta(resolved["root"], path)
+    if meta["status"] not in {"visual", "renderable", "safe"} or meta.get(
+        "kind"
+    ) not in {"visual", "renderable_document", "svg"}:
+        raise ValueError(f"Cannot visually read {path}: {meta['status']}")
+    if meta["kind"] in {"visual", "svg"} and page != 1:
+        raise ValueError("page is only supported for PDF and office documents")
+    if meta["kind"] in {"visual", "svg"} and crop is not None:
+        raise ValueError("region is only supported for PDF and office documents")
+    source = meta["resolved"]
+    if not _cache_root_is_safe():
+        raise ValueError("BEEMCP_CACHE_DIR must not be inside an allowlisted project")
+    digest = _source_digest(source, LIMITS["max_visual_file_bytes"])
+    cache_key = hashlib.sha256(
+        json.dumps(
+            {
+                "v": 1,
+                "source": digest,
+                "format": meta["format"],
+                "page": page,
+                "dpi": dpi,
+                "crop": crop,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    cached = _read_render_cache(cache_key)
+    base_metadata: dict[str, Any] = {
+        "path": path,
+        "detected_format": meta["format"],
+        "page": page,
+        "source_size": meta["size"],
+        "crop": crop,
+        "cached": cached is not None,
+    }
+    if cached is not None:
+        cached_data, cached_metadata = cached
+        try:
+            with Image.open(io.BytesIO(cached_data)) as image:
+                image.verify()
+            base_metadata.update(cached_metadata)
+            base_metadata["cached"] = True
+            return _image_content(base_metadata, cached_data, "image/png")
+        except UnidentifiedImageError, OSError:
+            cached = None
+            base_metadata["cached"] = False
+    try:
+        if meta["kind"] == "visual":
+            data, mime, width, height, extra = _render_raster(source, meta["format"])
+            base_metadata.update(
+                {"mime": mime, "width": width, "height": height, "page": None, **extra}
+            )
+        elif meta["kind"] == "svg":
+            data, rendered = _render_svg(source, dpi)
+            mime = "image/png"
+            base_metadata.update({"mime": mime, **rendered, "renderer": "cairosvg"})
+        elif meta["format"] == "pdf":
+            data, rendered = _pdf_render(source, page, dpi, crop)
+            mime = "image/png"
+            base_metadata.update({"mime": mime, **rendered, "renderer": "pymupdf"})
+        else:
+            data, rendered = _render_office(source, page, dpi, crop)
+            mime = "image/png"
+            base_metadata.update({"mime": mime, **rendered})
+    except RuntimeError as error:
+        if str(error) == "renderer_unavailable":
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {**base_metadata, "status": "renderer_unavailable"},
+                        sort_keys=True,
+                    ),
+                )
+            ]
+        raise
+    if mime == "image/png":
+        _write_render_cache(cache_key, data, base_metadata)
+    return _image_content(base_metadata, data, mime)
+
+
 @mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
 def search_project(target: str, query: str, mode: str) -> dict[str, Any]:
     if not query:
@@ -2060,119 +2763,134 @@ def search_project(target: str, query: str, mode: str) -> dict[str, Any]:
             f"Available modes: {', '.join(sorted(modes))}"
         )
 
-    search_paths = _mode_files(pcfg, mode)
-    tree_roots = _mode_tree_roots(pcfg, mode)
-    for root in tree_roots:
-        root_path = target_root / root
-        if not root_path.is_dir():
-            continue
-        for dirpath, dirnames, filenames in os.walk(root_path):
-            dirnames.sort()
-            filenames.sort()
-            rel_dir = Path(dirpath).relative_to(target_root)
-            for f in filenames:
-                rel = str(rel_dir / f)
-                if _is_denied(rel):
-                    continue
-                if rel not in search_paths:
-                    search_paths.append(rel)
-
+    # Keep Git argv compact: configured directories/tree roots are pathspecs,
+    # not one argument per tracked repository file.
+    allowed_specs = list(
+        dict.fromkeys(_mode_files(pcfg, mode) + _mode_tree_roots(pcfg, mode))
+    )
+    if not allowed_specs:
+        return {"results": [], "truncated": False}
+    inventory = _run_git_bytes(
+        [
+            "git",
+            "--literal-pathspecs",
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+        ]
+        + allowed_specs,
+        target_root,
+    )
+    paths = [os.fsdecode(value) for value in inventory.split(b"\0") if value]
+    paths = [path for path in paths if not _is_denied(path)]
+    tracked = [
+        os.fsdecode(value)
+        for value in _run_git_bytes(
+            ["git", "--literal-pathspecs", "ls-files", "--cached", "-z", "--"]
+            + allowed_specs,
+            target_root,
+        ).split(b"\0")
+        if value
+    ]
+    tracked = [path for path in tracked if not _is_denied(path)]
+    tracked_set = set(tracked)
+    preview_chars = max(1, LIMITS["max_context_chars"] // LIMITS["max_search_results"])
     results: list[dict[str, Any]] = []
     truncated = False
 
-    for rel in search_paths:
+    # A valid API query can still exceed OS argv limits.  It cannot match a
+    # bounded repository line in this configuration, so return a safe empty
+    # result instead of converting a data value into a subprocess failure.
+    if len(query.encode("utf-8")) > 32_000:
+        return {"results": results, "truncated": False}
+
+    def add_result(path: str, line: int, text: str) -> bool:
+        nonlocal truncated
         if len(results) >= LIMITS["max_search_results"]:
             truncated = True
-            break
-        meta = _classify_path_meta(target_root, rel)
-        if meta["status"] != "safe":
-            continue
-        resolved_path = meta["resolved"]
-        segment_chars = LIMITS["max_context_chars"]
-        preview_chars = max(
-            1,
-            segment_chars // LIMITS["max_search_results"],
-        )
+            return False
+        preview = text[:preview_chars].rstrip()
+        if len(text.rstrip("\n")) > preview_chars:
+            preview += "..."
+        candidate = {"path": path, "line": line, "text": preview}
+        if (
+            len(json.dumps({"results": results + [candidate]}, ensure_ascii=False))
+            > LIMITS["max_context_chars"]
+        ):
+            truncated = True
+            return False
+        results.append(candidate)
+        return True
 
-        with open(
-            resolved_path,
-            "r",
-            encoding="utf-8",
-            errors="replace",
-        ) as stream:
-            lineno = 1
-            prefix_parts: list[str] = []
-            prefix_length = 0
-            line_length = 0
-            overlap = ""
-            matched = False
+    # git grep searches Git blobs directly, avoiding a Python open/scan of each
+    # tracked candidate.  -e keeps a query beginning with '-' data, not syntax.
+    if tracked:
+        try:
+            cp = subprocess.run(
+                [
+                    "git",
+                    "--literal-pathspecs",
+                    "grep",
+                    "-z",
+                    "-n",
+                    "-F",
+                    "--no-color",
+                    "--full-name",
+                    "-e",
+                    query,
+                    "--",
+                ]
+                + allowed_specs,
+                cwd=target_root,
+                capture_output=True,
+                timeout=LIMITS["render_timeout_seconds"],
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Git search timed out") from error
+        if cp.returncode not in {0, 1}:
+            message = cp.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"Git search failed: {message}")
+        try:
+            grep_output = cp.stdout
+        except UnicodeDecodeError:
+            grep_output = b""
+        for row in grep_output.splitlines():
+            parts = row.split(b"\0", 2)
+            if len(parts) != 3:
+                continue  # includes Git's binary-match notification
+            raw_path, raw_line, raw_text = parts
+            if not raw_line.isdigit():
+                continue
+            path = os.fsdecode(raw_path)
+            if _is_denied(path):
+                continue
+            try:
+                text = raw_text.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                continue
+            if not add_result(path, int(raw_line), text):
+                break
 
-            while True:
-                segment = stream.readline(segment_chars)
-                eof = segment == ""
-                line_complete = eof or segment.endswith("\n")
-
-                if not eof:
-                    line_length += len(segment)
-
-                    if prefix_length < preview_chars:
-                        take = min(
-                            preview_chars - prefix_length,
-                            len(segment),
-                        )
-                        prefix_parts.append(segment[:take])
-                        prefix_length += take
-
-                    searchable = overlap + segment
-                    if query in searchable:
-                        matched = True
-
-                    if len(query) > 1:
-                        overlap = searchable[-(len(query) - 1) :]
-                    else:
-                        overlap = ""
-
-                if line_complete:
-                    if matched:
-                        text = "".join(prefix_parts).rstrip()
-                        if line_length > preview_chars:
-                            text += "..."
-
-                        candidate = {
-                            "path": rel,
-                            "line": lineno,
-                            "text": text,
-                        }
-                        trial = {
-                            "results": results + [candidate],
-                            "truncated": False,
-                        }
-
-                        if (
-                            len(json.dumps(trial, ensure_ascii=False))
-                            > LIMITS["max_context_chars"]
-                        ):
-                            truncated = True
-                            break
-
-                        results.append(candidate)
-
-                        if len(results) >= LIMITS["max_search_results"]:
-                            truncated = True
-                            break
-
-                    if eof:
-                        break
-
-                    lineno += 1
-                    prefix_parts = []
-                    prefix_length = 0
-                    line_length = 0
-                    overlap = ""
-                    matched = False
-
-        if truncated:
-            break
+    # git grep intentionally excludes untracked content.  Scan only this small
+    # remainder, using the same strict decoder and allowlist classification.
+    if not truncated:
+        for path in paths:
+            if path in tracked_set:
+                continue
+            classified = _classify_path(target_root, path)
+            if classified["status"] != "safe":
+                continue
+            for line_number, text in enumerate(
+                classified["content"].splitlines(), start=1
+            ):
+                if query in text and not add_result(path, line_number, text):
+                    break
+            if truncated:
+                break
 
     return {"results": results, "truncated": truncated}
 

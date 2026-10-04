@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Read-only MCP gateway for architectural analysis and code review through ChatGPT"
 requires-python = "==3.14.4"
 dependencies = [
+    "cairosvg>=2.8,<3",
     "mcp[cli]>=1.12",
+    "Pillow>=11,<13",
+    "PyMuPDF>=1.26,<2",
     "pyyaml>=6.0",
 ]
 
