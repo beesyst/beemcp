@@ -89,9 +89,11 @@ Use the paginated protocol for all reviews:
 3. Verify target, branch, base_branch, **snapshot_id**
 4. **get_review_bundle_page**(cursor="") — paginated safe diff
 5. Repeat with **next_cursor** until **has_more=false**
-6. For each existing changed/untracked text file, use **read_project_file**; for a
+6. **get_review_sources_page**(cursor="") — read all changed/untracked working-tree text;
+   repeat with **next_cursor** until **has_more=false**, collecting content by `path`
+7. Check `skipped_files` and compare snapshots across inventory, diff, and sources.
+   Report incomplete coverage when files were skipped or snapshots differ. For a
    manifest item marked `readable_via: read_project_visual`, request the visual lazily
-7. REVIEW INCOMPLETE only after exhausting bundle pagination + per-file fallback
 
 ### Tool distinction
 
@@ -100,6 +102,7 @@ Use the paginated protocol for all reviews:
 | `get_project_context`    | Project/process context (configured files)                |
 | `get_review_manifest`    | Paginated Git inventory (concatenate content, parse JSON) |
 | `get_review_bundle_page` | Paginated safe diff (cursor protocol)                     |
+| `get_review_sources_page` | All changed working-tree text, automatically paginated   |
 | `read_project_file`      | Per-file content (chunked)                                |
 | `read_project_visual`    | Native image/PDF/SVG/document page visual                 |
 
@@ -107,8 +110,9 @@ Use the paginated protocol for all reviews:
 
 - Cursor is opaque to the client (canonical unpadded base64url-encoded JSON;
   the server also accepts legacy padded base64url cursors)
-- Contains `kind` (either `"manifest"` or `"diff"`), `target`, `mode`, `snapshot_id`, `page`
+- Contains `kind` (`"manifest"`, `"diff"`, or `"sources"`), `target`, `mode`, `snapshot_id`, `page`
 - Diff cursors also contain `segment` and `offset` for page-accurate streaming
+- Source cursors also contain `file_index`, `line` (1-based), and `column` (0-based)
 - Malformed cursor → ValueError (the public error is bounded; decoder and
   validation stages distinguish base64, UTF-8/JSON, structure, identity,
   snapshot, segment, offset, and page failures internally)
@@ -117,7 +121,7 @@ Use the paginated protocol for all reviews:
 - Cursor from another mode → ValueError
 - Cursor from a stale snapshot (HEAD/status/inventory changed) → ValueError
 - Page out of range → ValueError
-- `snapshot_id` is a deterministic hash of target, mode, branch, HEAD, full inventory, and SHA-256 of the actual safe diff
+- `snapshot_id` is a deterministic hash of target, mode, branch, HEAD, full inventory, the actual safe diff, readable changed source bytes, and index object IDs (including oversized files)
 - Changing content of a dirty/staged file invalidates the cursor
 - Each page ≤ `limits.max_review_page_chars` (default 30000)
 
@@ -134,6 +138,43 @@ Use the paginated protocol for all reviews:
 4. The last page reports `has_more=false`, `next_cursor=null`, `truncated=false`
 5. The backward-compatible `get_review_bundle` still applies `max_diff_chars`
    and reports `truncated`
+
+### Source pagination (get_review_sources_page)
+
+`get_review_sources_page(target: str, mode: str, cursor: str = "")` reuses the
+manifest inventory, deduplicates paths, and walks them in sorted order. Each
+response contains one file chunk or one explicit skip. Large text files remain
+readable even when the diff inventory marks them `oversized`.
+
+Responses include `target`, `project`, `mode`, `snapshot_id`, `cursor`,
+`page_number`, `path`, `source: "working_tree"`, `index_may_differ`, `start_line`,
+`start_column`, `end_line`, `next_line`, `next_column`, `content`, `skipped_files`,
+`next_cursor`, `has_more`, and `truncated: false`; successful text reads also
+include `encoding`. `end_line` is the last line touched; `next_line`/`next_column`
+identify a continuation within this file, or are null at EOF. `next_cursor`
+automatically moves into the next path at EOF. A line longer than the character
+budget continues at a column offset. Line numbers count LF characters; original
+CRLF and CR characters are preserved. Text is strictly decoded using the existing
+encoding policy (UTF-8 or supported BOM); BOMs are encoding markers, not content.
+
+Skips use `[{"path": "...", "reason": "deleted"}]` (other reasons include
+`denied`, `escaping`, `binary`, `visual`, `renderable`, `unsupported_encoding`,
+and `broken`). If an encoding failure is discovered after earlier chunks, discard
+that file's partial content and record the skip. An empty inventory returns
+`path: null`, empty content/skips, `has_more: false`, and `next_cursor: null`.
+The character budget bounds `content`; response metadata is additional.
+
+For ChatGPT: call with an empty cursor, collect each chunk under its `path`, record
+every skip, and pass `next_cursor` unchanged to the next call until `has_more` is
+false. Never treat a cursor error as completion. Restart all review streams if a
+snapshot becomes stale or differs between inventory, diffs, and sources. Source
+pages check the snapshot both before and after reading, including the final page.
+
+Source pages contain **current working-tree content**, including committed,
+staged, unstaged, and untracked changed paths. `index_may_differ` is conservative:
+it is true for unstaged or untracked paths. Use **diff pagination** to distinguish
+base/HEAD/index/working-tree changes; source pages do not substitute for Git diffs.
+Existing `read_project_file` remains available for individual paths.
 
 ### get_project_context metadata
 
@@ -208,7 +249,7 @@ Rendered PDF/SVG/office images are cached outside projects at `~/.cache/beemcp/`
    — читать все страницы, собрать JSON
 3. get_review_bundle_page target=beeagent-pr123 mode=B cursor=""
 4. Повторяй шаг 3 с next_cursor до has_more=false
-5. Для каждого changed/untracked safe файла читай read_project_file при необходимости
+5. Читай get_review_sources_page до has_more=false; проверь skipped_files и snapshot_id
 
 Не изменяй проект и не запускай агентов.
 ```
@@ -327,7 +368,7 @@ After modifying tool declarations, the ChatGPT connector may cache stale schema.
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains ten tools
+2. `./start.sh doctor` — confirm local tools/list contains eleven tools
 3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
@@ -340,7 +381,7 @@ Important:
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with fewer than ten tools is stale.
+- A schema with fewer than eleven tools is stale.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual

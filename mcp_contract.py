@@ -9,6 +9,7 @@ EXPECTED_TOOLS = (
     "get_project_context",
     "get_review_manifest",
     "get_review_bundle_page",
+    "get_review_sources_page",
     "get_review_bundle",
     "read_project_file",
     "read_project_visual",

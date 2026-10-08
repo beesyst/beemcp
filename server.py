@@ -350,11 +350,11 @@ mcp = FastMCP(
         "3. Verify target, branch, base_branch, and snapshot_id\n"
         '4. get_review_bundle_page(cursor="") — get first page of paginated safe diff\n'
         "5. Repeat with next_cursor until has_more=false\n"
-        "6. For each existing changed/untracked text file, use read_project_file "
-        "if needed (start_line=1, start_column=0; repeat until next_line is null). "
+        '6. get_review_sources_page(cursor="") — read all changed working-tree text; '
+        "repeat next_cursor until has_more=false and inspect skipped_files. "
         "For files marked readable_via read_project_visual, request the needed page/image lazily.\n"
         "7. REVIEW INCOMPLETE is allowed only after exhausting bundle pagination "
-        "and per-file read_project_file fallback\n\n"
+        "and source pagination; report skips and snapshot mismatches\n\n"
         "Text files with reason 'oversized' or 'context_limit' in omitted_files CAN be "
         "read via read_project_file. Visual and renderable_document files marked "
         "readable_via read_project_visual are visual-only lazy reads. Files with reason "
@@ -365,6 +365,7 @@ mcp = FastMCP(
         "- get_project_context: read configured files for a target and mode\n"
         "- get_review_manifest: paginated Git inventory (concatenate content pages, "
         "parse as JSON; cursor protocol)\n"
+        "- get_review_sources_page: automatically paginate all changed working-tree text sources\n"
         "- get_review_bundle_page: get one page of paginated safe diff (cursor protocol)\n"
         "- get_review_bundle: bounded compatibility shim — identity fields + first "
         "safe diff page + pagination metadata; no inventory (use get_review_manifest "
@@ -750,7 +751,9 @@ def _decode_text(data: bytes) -> tuple[str, str]:
     return data.decode("utf-8", errors="strict"), "utf-8"
 
 
-def _open_strict_text(path: Path) -> tuple[io.TextIOWrapper, str]:
+def _open_strict_text(
+    path: Path, *, newline: str | None = None
+) -> tuple[io.TextIOWrapper, str]:
     """Open a project text file for bounded, strict incremental decoding."""
     stream = path.open("rb")
     try:
@@ -764,7 +767,9 @@ def _open_strict_text(path: Path) -> tuple[io.TextIOWrapper, str]:
             encoding = "utf-16"
         else:
             encoding = "utf-8"
-        return io.TextIOWrapper(stream, encoding=encoding, errors="strict"), encoding
+        return io.TextIOWrapper(
+            stream, encoding=encoding, errors="strict", newline=newline
+        ), encoding
     except Exception:
         stream.close()
         raise
@@ -862,6 +867,9 @@ def _safe_read_file_chunked(
     raw_path: str,
     start_line: int = 1,
     start_column: int = 0,
+    *,
+    max_chars: int | None = None,
+    exact: bool = False,
 ) -> dict[str, Any]:
     if start_line < 1:
         raise ValueError(f"start_line must be >= 1, got {start_line}")
@@ -879,7 +887,7 @@ def _safe_read_file_chunked(
         raise ValueError(f"Cannot read {raw_path}: {meta['status']}")
 
     resolved = meta["resolved"]
-    max_chars = LIMITS["max_context_chars"]
+    max_chars = max_chars or LIMITS["max_context_chars"]
 
     parts: list[str] = []
     total = 0
@@ -887,11 +895,15 @@ def _safe_read_file_chunked(
     cur_col = 0
     end_line: int | None = None
     try:
-        stream, encoding = _open_strict_text(resolved)
+        stream, encoding = _open_strict_text(resolved, newline="\n" if exact else None)
         with stream:
             while cur_line < start_line:
                 chunk = stream.readline(max_chars)
                 if not chunk:
+                    if exact:
+                        raise CursorError(
+                            "invalid_position", "Source line out of range"
+                        )
                     return {
                         "path": raw_path,
                         "start_line": start_line,
@@ -909,6 +921,10 @@ def _safe_read_file_chunked(
             while remaining > 0:
                 chunk = stream.readline(min(max_chars, remaining))
                 if not chunk or chunk.endswith("\n"):
+                    if exact:
+                        raise CursorError(
+                            "invalid_position", "Source column out of range"
+                        )
                     raise ValueError(
                         f"start_column exceeds line {start_line}: {start_column}"
                     )
@@ -928,6 +944,8 @@ def _safe_read_file_chunked(
                 else:
                     cur_col += len(chunk)
             has_more = bool(stream.read(1))
+            if exact and not parts and (start_line != 1 or start_column != 0):
+                raise CursorError("invalid_position", "Source position is at EOF")
     except UnicodeDecodeError as error:
         raise ValueError(f"Cannot read {raw_path}: unsupported_encoding") from error
     except OSError as error:
@@ -1867,7 +1885,6 @@ def _stream_hash_review_state(inv: dict[str, Any]) -> str:
     target_root = inv["target_root"]
     diff_pathspec = inv["diff_pathspec"]
     merge_base = inv["merge_base"]
-    safe_untracked = inv["safe_untracked"]
     chunk = 65536
     h = hashlib.sha256()
     if diff_pathspec:
@@ -1902,20 +1919,34 @@ def _stream_hash_review_state(inv: dict[str, Any]) -> str:
                     h.update(block)
             finally:
                 stream.close()
-    for f in safe_untracked:
-        fp = target_root / f
-        try:
-            h.update(os.fsencode(fp.name))
-            size = fp.stat().st_size
-            h.update(str(size).encode())
-            with open(fp, "rb") as fh:
-                while True:
-                    data = fh.read(chunk)
-                    if not data:
-                        break
-                    h.update(data)
-        except OSError:
+    # Source pagination includes large files omitted from the safe diff. Hash all
+    # currently readable changed sources using the same safe-path classification.
+    source_paths: list[str] = []
+    for rel in inv["changed_files"]:
+        if rel in inv["redacted_paths"]:
             continue
+        meta = _classify_path_meta(target_root, rel)
+        if meta["status"] != "safe":
+            continue
+        source_paths.append(rel)
+        try:
+            h.update(os.fsencode(rel))
+            h.update(str(meta["size"]).encode())
+            with open(meta["resolved"], "rb") as fh:
+                while data := fh.read(chunk):
+                    h.update(data)
+        except OSError as error:
+            raise ValueError("Review source changed or became unreadable") from error
+    if source_paths:
+        # Oversized index blobs are omitted from diff pagination too. Their object
+        # IDs detect staging changes even when current source bytes stay identical.
+        h.update(
+            _run_git_bytes(
+                ["git", "--literal-pathspecs", "ls-files", "--stage", "-z", "--"]
+                + source_paths,
+                target_root,
+            )
+        )
     manifest_state = _build_manifest_dict(inv)
     manifest_state["mode"] = inv.get("_mode", "")
     h.update(
@@ -2232,6 +2263,120 @@ def get_review_bundle_page(
         "content": content,
         "truncated": False,
     }
+    return result
+
+
+@mcp.tool(annotations=READ_ONLY_TOOL_ANNOTATIONS)
+def get_review_sources_page(target: str, mode: str, cursor: str = "") -> dict[str, Any]:
+    """Read all changed working-tree text sources, one bounded chunk or skip per call."""
+    inv = _git_inventory(target, mode)
+    inv["_mode"] = mode
+    snapshot_id = _build_review_snapshot_id(inv)
+    paths = inv["changed_files"]
+    file_index, start_line, start_column, page = 0, 1, 0, 0
+    if cursor:
+        decoded = _decode_cursor_payload(cursor)
+        _validate_cursor_base(decoded, "sources", target, mode, snapshot_id)
+        values = [decoded.get(key) for key in ("file_index", "line", "column", "page")]
+        if any(type(value) is not int for value in values):
+            raise CursorError("invalid_position", "Invalid source cursor position")
+        file_index, start_line, start_column, page = values
+        if (
+            not (0 <= file_index < len(paths))
+            or start_line < 1
+            or start_column < 0
+            or page < 0
+        ):
+            raise CursorError("invalid_position", "Source cursor position out of range")
+
+    result: dict[str, Any] = {
+        "target": target,
+        "project": inv["resolved"]["project"],
+        "mode": mode,
+        "snapshot_id": snapshot_id,
+        "cursor": cursor,
+        "page_number": page,
+        "path": None,
+        "source": "working_tree",
+        "index_may_differ": False,
+        "start_line": start_line,
+        "start_column": start_column,
+        "end_line": None,
+        "next_line": None,
+        "next_column": None,
+        "content": "",
+        "skipped_files": [],
+        "truncated": False,
+    }
+    next_index, next_line, next_column = file_index + 1, 1, 0
+    if paths:
+        path = paths[file_index]
+        result["path"] = path
+        result["index_may_differ"] = path in inv["unstaged"] or path in inv["untracked"]
+        meta = _classify_path_meta(inv["target_root"], path)
+        reason = None
+        if path in inv["redacted_paths"]:
+            reason = "denied"
+        elif path in inv["deleted_files"] and not os.path.lexists(
+            inv["target_root"] / path
+        ):
+            reason = "deleted"
+        elif meta["status"] != "safe":
+            reason = meta["status"]
+        if reason is None:
+            try:
+                chunk = _safe_read_file_chunked(
+                    inv["target_root"],
+                    path,
+                    start_line,
+                    start_column,
+                    max_chars=LIMITS["max_review_page_chars"],
+                    exact=True,
+                )
+            except CursorError:
+                raise
+            except ValueError as error:
+                # Only file-read failures are skips; invalid cursor positions fail.
+                reason = str(error).rsplit(": ", 1)[-1]
+                if reason not in {"unsupported_encoding", "broken"}:
+                    raise
+            else:
+                result.update(chunk)
+                if chunk["next_line"] is not None:
+                    next_index = file_index
+                    next_line, next_column = chunk["next_line"], chunk["next_column"]
+        if reason is not None:
+            if start_line != 1 or start_column != 0:
+                # Decode failure can occur after earlier pages of this same file.
+                if reason != "unsupported_encoding":
+                    raise CursorError(
+                        "invalid_position", "Skipped file has no source position"
+                    )
+            result["skipped_files"] = [{"path": path, "reason": reason}]
+
+    # Detect changes during a page, including the final page and inventory changes.
+    after = _git_inventory(target, mode)
+    after["_mode"] = mode
+    if _build_review_snapshot_id(after) != snapshot_id:
+        raise CursorError(
+            "stale_snapshot", "Worktree changed while reading source page"
+        )
+    has_more = bool(paths) and next_index < len(paths)
+    result["has_more"] = has_more
+    result["next_cursor"] = (
+        _encode_cursor(
+            "sources",
+            target,
+            mode,
+            snapshot_id,
+            page + 1,
+            file_index=next_index,
+            line=next_line,
+            column=next_column,
+        )
+        if has_more
+        else None
+    )
     return result
 
 

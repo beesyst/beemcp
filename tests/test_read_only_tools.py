@@ -996,7 +996,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
         self.assertEqual(data["tool_contract_version"], 4)
-        self.assertEqual(data["tool_count"], 10)
+        self.assertEqual(data["tool_count"], 11)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -3925,7 +3925,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 10)
+        self.assertEqual(len(tools), 11)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
@@ -4070,6 +4070,34 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                                     "cursor": legacy_cursor,
                                 },
                             )
+                            source_cursor = ""
+                            source_parts: list[str] = []
+                            skipped: list[dict[str, str]] = []
+                            for _ in range(100):
+                                source = await session.call_tool(
+                                    "get_review_sources_page",
+                                    arguments={
+                                        "target": "transport-proj",
+                                        "mode": "A",
+                                        "cursor": source_cursor,
+                                    },
+                                )
+                                self.assertFalse(source.isError)
+                                data = dict(source.structuredContent or {})
+                                self.assertEqual(data["snapshot_id"], first_data["snapshot_id"])
+                                self.assertLessEqual(len(data["content"]), 100)
+                                source_parts.append(data["content"])
+                                skipped.extend(data["skipped_files"])
+                                if not data["has_more"]:
+                                    break
+                                source_cursor = data["next_cursor"]
+                            else:
+                                self.fail("Source transport cursor chain did not finish")
+                            self.assertEqual(
+                                "".join(source_parts),
+                                (repo / "large.txt").read_text(encoding="utf-8"),
+                            )
+                            self.assertEqual(skipped, [{"path": "visual.png", "reason": "visual"}])
                             return (
                                 first_data,
                                 dict(second.structuredContent or {}),
