@@ -16,6 +16,10 @@ limits:
   render_timeout_seconds: 30
   max_cache_bytes: 500000000
 
+local_artifacts:
+  enabled: true
+  root: /tmp
+
 deny_paths:
   - ".env"
   - ".env.*"

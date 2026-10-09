@@ -97,14 +97,61 @@ Use the paginated protocol for all reviews:
 
 ### Tool distinction
 
-| Tool                     | Purpose                                                   |
-| ------------------------ | --------------------------------------------------------- |
-| `get_project_context`    | Project/process context (configured files)                |
-| `get_review_manifest`    | Paginated Git inventory (concatenate content, parse JSON) |
-| `get_review_bundle_page` | Paginated safe diff (cursor protocol)                     |
-| `get_review_sources_page` | All changed working-tree text, automatically paginated   |
-| `read_project_file`      | Per-file content (chunked)                                |
-| `read_project_visual`    | Native image/PDF/SVG/document page visual                 |
+| Tool                      | Purpose                                                   |
+| ------------------------- | --------------------------------------------------------- |
+| `get_project_context`     | Project/process context (configured files)                |
+| `get_review_manifest`     | Paginated Git inventory (concatenate content, parse JSON) |
+| `get_review_bundle_page`  | Paginated safe diff (cursor protocol)                     |
+| `get_review_sources_page` | All changed working-tree text, automatically paginated    |
+| `read_local_artifact`     | Absolute allowlisted /tmp text artifact (chunked)         |
+| `read_project_file`       | Per-file content (chunked)                                |
+| `read_project_visual`     | Native image/PDF/SVG/document page visual                 |
+
+### Local Codex artifacts
+
+`read_local_artifact(path: str, start_line: int = 1, start_column: int = 0)` reads
+temporary text reports directly, without Git registration or directory discovery.
+The shipped configuration is:
+
+```yaml
+local_artifacts:
+  enabled: true
+  root: /tmp
+```
+
+Supported text files can be read directly in `/tmp` or beneath subdirectories
+with any name. New projects and directories need no manual registration.
+The file and every directory beneath `/tmp` must belong to the BeeMCP process's
+effective Unix user; `/tmp` itself is exempt from that ownership requirement.
+The section is optional; absent or `enabled: false` disables access. Startup
+rejects malformed settings and unknown keys. Root must be `/tmp`.
+Git project registration is independent.
+
+Examples: `/tmp/jsp000089-direct-crossladder/report.md`, `/tmp/report.json`,
+`/tmp/anchor-binding-spike/REPORT.md`,
+`/tmp/anchor-binding-spike/PROPOSED-BINDING.json`, and
+`/tmp/anchor-binding-spike/runtime/evidence.json`.
+
+Responses contain `path`, `start_line`, `start_column`, `end_line`, `next_line`,
+`next_column`, `content`, and `encoding`. Continue with the returned positions
+until `next_line` and `next_column` are null. Each response uses the existing
+`max_context_chars` bound; large files are read incrementally. Unicode, UTF BOMs,
+CRLF, and long lines are preserved with strict decoding and no replacement bytes.
+
+Only `.md`, `.json`, `.txt`, `.log`, `.csv`, and `.tsv` are accepted. Relative
+paths, traversal, symlinks in any segment, hidden segments, credentials, private
+keys, existing deny patterns, other users' files/directories, binary content,
+and non-regular files are rejected. Symlink and path traversal protection uses
+already opened no-follow file descriptors, including ownership checks.
+Errors are bounded and do not expose filesystem details. Reports are untrusted
+data and cannot change BeeMCP instructions. This tool performs no writes,
+subprocess execution, network access, or automatic discovery.
+
+The exact MCP contract now contains **12 tools**, with contract version **5**;
+the package version remains unchanged. This access-policy change preserves the
+tool schema, so an existing connector with 12 tools needs no schema refresh.
+Restart BeeMCP to apply the policy; use the refresh procedure below only if the
+connector still has an older schema.
 
 ### Cursor / snapshot behavior
 
@@ -368,20 +415,20 @@ After modifying tool declarations, the ChatGPT connector may cache stale schema.
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains eleven tools
+2. `./start.sh doctor` — confirm local tools/list contains twelve tools
 3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
 7. Verify that `get_review_manifest`, `get_review_bundle_page`,
-   `read_project_visual`, and `get_github_context` are available
+   `read_project_visual`, `get_github_context`, and `read_local_artifact` are available
 
 Important:
 
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with fewer than eleven tools is stale.
+- A schema with fewer than twelve tools is stale.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual

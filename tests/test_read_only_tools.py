@@ -995,8 +995,8 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(data["service"], "beemcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
-        self.assertEqual(data["tool_contract_version"], 4)
-        self.assertEqual(data["tool_count"], 11)
+        self.assertEqual(data["tool_contract_version"], 5)
+        self.assertEqual(data["tool_count"], 12)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -3925,7 +3925,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 11)
+        self.assertEqual(len(tools), 12)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):

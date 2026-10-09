@@ -129,7 +129,7 @@ case "$*" in
   *healthz*) [ "${FAIL_HEALTH:-0}" = 0 ] ;;
   *versionz*)
     [ "${FAIL_VERSIONZ:-0}" = 0 ] && \
-      echo '{"service":"beemcp","git_head":"abc123","tool_contract_version":4,"tool_count":10,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
+      echo '{"service":"beemcp","git_head":"abc123","tool_contract_version":5,"tool_count":12,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
     [ "${FAIL_VERSIONZ:-0}" = 0 ]
     ;;
   *) exit 0 ;;
