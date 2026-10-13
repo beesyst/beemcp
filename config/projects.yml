@@ -139,6 +139,77 @@ projects:
         files:
           - docs/ROADMAP.md
 
+  beescan:
+    source: ../../beescan
+    base_branch: main
+    github_repo: beesyst/beescan
+
+    context_modes:
+      A:
+        files:
+          - README.md
+          - README.ru.md
+          - AGENTS.md
+          - docs/ROADMAP.md
+          - docs/SDLC.md
+          - docs/SECURITY.md
+          - docs/SPEC.md
+          - .github/ISSUE_TEMPLATE/issue.md
+          - .github/PULL_REQUEST_TEMPLATE/pr.md
+
+      B:
+        extends: A
+        files:
+          - pyproject.toml
+          - config/defaults.yml
+          - docs/ARCHITECTURE.md
+          - docs/DEV_GUIDE.md
+          - docs/DATA_MODEL.md
+          - docs/TOOLS.md
+          - docs/WORKFLOWS.md
+          - docs/adr/0001-beescan-architecture.md
+          - src/beescan/module.py
+          - src/beescan/domain/models.py
+          - src/beescan/capabilities/catalog.py
+          - .github/workflows/ci.yml
+          - .github/workflows/release-please.yml
+          - .github/release-please/config.json
+          - .github/release-please/manifest.json
+
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+          - config
+          - docs
+          - .agents
+          - .github
+
+    related:
+      - project: beeagent
+        files:
+          - docs/ARCHITECTURE.md
+          - docs/ROADMAP.md
+          - src/beeagent_module/core/module_contract.py
+          - src/beeagent_module/core/module_runtime.py
+          - src/beeagent_module/core/module_registry.py
+          - src/beeagent_module/core/capability_runtime.py
+
+      - project: beesdk
+        files:
+          - docs/ARCHITECTURE.md
+          - docs/SPEC.md
+          - src/beesdk/modules.py
+          - src/beesdk/artifacts.py
+          - src/beesdk/capabilities.py
+
+      - project: beeui
+        files:
+          - docs/ARCHITECTURE.md
+          - docs/API_CONTRACT.md
+          - docs/INTEGRATION.md
+
   beeagent-rop:
     source: ../../beeagent-rop
     base_branch: main
