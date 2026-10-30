@@ -84,12 +84,68 @@ class LocalArtifactTests(unittest.TestCase):
             self.assertEqual(Path(result["path"]).parent, Path("/tmp"))
 
     def test_plain_utf8_and_all_supported_extensions(self):
-        for suffix in (".md", ".json", ".txt", ".log", ".csv", ".tsv"):
+        for suffix in (".md", ".json", ".txt", ".log", ".csv", ".tsv", ".lean"):
             with self.subTest(suffix=suffix):
                 path = self.write("unicode" + suffix, "Привет 🌍\r\n".encode())
                 result = self.mod.read_local_artifact(str(path))
                 self.assertEqual(result["content"], "Привет 🌍\r\n")
                 self.assertEqual(result["encoding"], "utf-8")
+
+    def test_lean_source_directly_in_tmp(self):
+        content = "-- Проверка ∀ n\nexample (n : Nat) : n = n := rfl\n"
+        with tempfile.NamedTemporaryFile(suffix=".lean", dir="/tmp") as artifact:
+            artifact.write(content.encode("utf-8"))
+            artifact.flush()
+            result = self.mod.read_local_artifact(artifact.name)
+        self.assertEqual(result["content"], content)
+        self.assertEqual(result["encoding"], "utf-8")
+        self.assertIsNone(result["next_line"])
+        self.assertIsNone(result["next_column"])
+
+    def test_nested_lean_source_exact_content_and_boms(self):
+        content = "import Mathlib\r\n\r\n-- ∀ n, n = n\r\nexample (n : ℕ) : n = n := by\r\n  rfl"
+        for encoding in ("utf-8", "utf-8-sig", "utf-16", "utf-32"):
+            with self.subTest(encoding=encoding):
+                path = self.write(
+                    "milestone-1/proofs/Main.lean", content.encode(encoding)
+                )
+                result = self.mod.read_local_artifact(str(path))
+                self.assertEqual(result["path"], str(path))
+                self.assertEqual(result["content"], content)
+                self.assertEqual(result["encoding"], encoding)
+                self.assertIsNone(result["next_line"])
+                self.assertIsNone(result["next_column"])
+
+    def test_lean_source_pagination_preserves_original(self):
+        content = (
+            "import Mathlib\r\n-- "
+            + "∀ n : ℕ, n = n; " * 80
+            + "\r\n"
+            + "example (n : ℕ) : n = n := by\r\n  rfl\r\n" * 20
+        )
+        path = self.write("milestone-2/proofs/Main.lean", content.encode("utf-8"))
+        self.mod.LIMITS["max_context_chars"] = 97
+        chunks = []
+        positions = set()
+        line, column = 1, 0
+        for _ in range(len(content) + 1):
+            self.assertNotIn((line, column), positions)
+            positions.add((line, column))
+            result = self.mod.read_local_artifact(str(path), line, column)
+            self.assertEqual(
+                (result["start_line"], result["start_column"]), (line, column)
+            )
+            self.assertLessEqual(len(result["content"]), 97)
+            chunks.append(result["content"])
+            if result["next_line"] is None:
+                self.assertIsNone(result["next_column"])
+                break
+            line, column = result["next_line"], result["next_column"]
+        else:
+            self.fail("Lean source pagination did not finish")
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(any(column > 0 for _, column in positions))
+        self.assertEqual("".join(chunks), content)
 
     def test_large_unicode_bom_crlf_long_line_incremental(self):
         content = "Привет 🌍\r\n" + "長" * 220000 + "\r\nend\r\n"
@@ -135,6 +191,8 @@ class LocalArtifactTests(unittest.TestCase):
             "/home/bee/.ssh/id_ed25519",
             "/tmp-other/report.md",
             "/tmp/anchor-test/../../etc/passwd",
+            str(self.root / "milestone" / ".." / "Main.lean"),
+            "/var/tmp/Main.lean",
             "REPORT.md",
             str(self.root / "nul\x00.md"),
             "/tmp",
@@ -157,6 +215,11 @@ class LocalArtifactTests(unittest.TestCase):
             "id_ed25519.txt",
             "runtime/credentials/report.md",
             "data.py",
+            ".env.lean",
+            "secrets.lean",
+            "credentials.lean",
+            "private-key.lean",
+            "Main.lean.bak",
             "__pycache__/report.md",
         ):
             path = self.write(name)
@@ -174,7 +237,7 @@ class LocalArtifactTests(unittest.TestCase):
             for index, destination in enumerate(
                 (Path("/etc/passwd"), target, self.write("real.md"))
             ):
-                link = self.root / f"link{index}.md"
+                link = self.root / f"link{index}.lean"
                 link.symlink_to(destination)
                 with (
                     self.subTest(destination=destination),
@@ -183,8 +246,9 @@ class LocalArtifactTests(unittest.TestCase):
                     self.mod.read_local_artifact(str(link))
             link_dir = self.root / "linked"
             link_dir.symlink_to(self.root, target_is_directory=True)
+            self.write("real.lean")
             with self.assertRaises(ValueError):
-                self.mod.read_local_artifact(str(link_dir / "real.md"))
+                self.mod.read_local_artifact(str(link_dir / "real.lean"))
 
     def test_top_level_directory_symlink(self):
         link = self.root.with_name(self.root.name + "-link")
@@ -236,11 +300,13 @@ class LocalArtifactTests(unittest.TestCase):
     def test_foreign_file_uid(self):
         path = self.write("REPORT.md")
         self.assert_foreign_owner_rejected(path, path)
+        path = self.write("Main.lean")
+        self.assert_foreign_owner_rejected(path, path)
         with tempfile.NamedTemporaryFile(suffix=".json", dir="/tmp") as artifact:
             self.assert_foreign_owner_rejected(Path(artifact.name), Path(artifact.name))
 
     def test_foreign_directory_uid(self):
-        path = self.write("runtime/nested/evidence.json")
+        path = self.write("runtime/nested/Main.lean")
         for directory in (self.root, self.root / "runtime", path.parent):
             with self.subTest(directory=directory):
                 self.assert_foreign_owner_rejected(path, directory)
@@ -253,17 +319,21 @@ class LocalArtifactTests(unittest.TestCase):
             b"%PDF-1.7",
             b"a" * 9000 + b"\x00",
         ):
-            path = self.write("binary.txt", data)
-            with self.subTest(data=data[:10]), self.assertRaises(ValueError):
-                self.mod.read_local_artifact(str(path))
+            for suffix in (".txt", ".lean"):
+                path = self.write("binary" + suffix, data)
+                with (
+                    self.subTest(data=data[:10], suffix=suffix),
+                    self.assertRaises(ValueError),
+                ):
+                    self.mod.read_local_artifact(str(path))
 
     def test_directory_fifo_socket(self):
-        directory = self.root / "directory.md"
+        directory = self.root / "directory.lean"
         directory.mkdir()
-        fifo = self.root / "fifo.txt"
+        fifo = self.root / "fifo.lean"
         os.mkfifo(fifo)
         with socket.socket(socket.AF_UNIX) as sock:
-            socket_path = self.root / "socket.log"
+            socket_path = self.root / "socket.lean"
             sock.bind(str(socket_path))
             for path in (directory, fifo, socket_path):
                 with self.subTest(path=path), self.assertRaises(ValueError):

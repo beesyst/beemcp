@@ -2488,7 +2488,15 @@ def read_local_artifact(
     if (
         not parts
         or Path(path).suffix.lower()
-        not in {".md", ".json", ".txt", ".log", ".csv", ".tsv"}
+        not in {
+            ".md",
+            ".json",
+            ".txt",
+            ".log",
+            ".csv",
+            ".tsv",
+            ".lean",
+        }
         or any(
             part.startswith(".")
             or _is_denied(part)

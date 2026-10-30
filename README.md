@@ -110,7 +110,8 @@ Use the paginated protocol for all reviews:
 ### Local Codex artifacts
 
 `read_local_artifact(path: str, start_line: int = 1, start_column: int = 0)` reads
-temporary text reports directly, without Git registration or directory discovery.
+temporary text reports and Lean source files directly, without Git registration
+or directory discovery.
 The shipped configuration is:
 
 ```yaml
@@ -129,8 +130,9 @@ Git project registration is independent.
 
 Examples: `/tmp/jsp000089-direct-crossladder/report.md`, `/tmp/report.json`,
 `/tmp/anchor-binding-spike/REPORT.md`,
-`/tmp/anchor-binding-spike/PROPOSED-BINDING.json`, and
-`/tmp/anchor-binding-spike/runtime/evidence.json`.
+`/tmp/anchor-binding-spike/PROPOSED-BINDING.json`,
+`/tmp/anchor-binding-spike/runtime/evidence.json`, and
+`/tmp/lean-check/milestone-1/proofs/Main.lean`.
 
 Responses contain `path`, `start_line`, `start_column`, `end_line`, `next_line`,
 `next_column`, `content`, and `encoding`. Continue with the returned positions
@@ -138,7 +140,9 @@ until `next_line` and `next_column` are null. Each response uses the existing
 `max_context_chars` bound; large files are read incrementally. Unicode, UTF BOMs,
 CRLF, and long lines are preserved with strict decoding and no replacement bytes.
 
-Only `.md`, `.json`, `.txt`, `.log`, `.csv`, and `.tsv` are accepted. Relative
+Only `.md`, `.json`, `.txt`, `.log`, `.csv`, `.tsv`, and `.lean` are accepted.
+Temporary `.lean` source uses the same strict UTF-8 or supported UTF BOM decoding
+and pagination as other text artifacts. Relative
 paths, traversal, symlinks in any segment, hidden segments, credentials, private
 keys, existing deny patterns, other users' files/directories, binary content,
 and non-regular files are rejected. Symlink and path traversal protection uses
