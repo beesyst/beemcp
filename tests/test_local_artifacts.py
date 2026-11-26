@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import codecs
+import hashlib
+import io
+import json
 import os
 import socket
 import stat
@@ -10,6 +14,9 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+
+from mcp.types import ImageContent, TextContent
+from PIL import Image
 
 import test_read_only_tools as fixtures
 
@@ -36,6 +43,169 @@ class LocalArtifactTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
+
+    def write_image(self, name, image_format="PNG", size=(8, 6)):
+        path = self.write(name)
+        Image.new("RGB", size, "green").save(path, format=image_format)
+        return path
+
+    def test_visual_formats_and_nested_paths(self):
+        for name, image_format, mime in (
+            ("snapshot.png", "PNG", "image/png"),
+            ("playwright/deep/photo.JPG", "JPEG", "image/jpeg"),
+            ("playwright/deep/capture.webp", "WEBP", "image/webp"),
+        ):
+            with self.subTest(name=name):
+                path = self.write_image(name, image_format)
+                metadata, image = self.mod.read_local_visual(str(path))
+                self.assertIs(type(metadata), TextContent)
+                self.assertIs(type(image), ImageContent)
+                self.assertEqual(image.mimeType, mime)
+                self.assertEqual(
+                    json.loads(metadata.text),
+                    {
+                        "path": str(path),
+                        "detected_format": mime,
+                        "mime": mime,
+                        "width": 8,
+                        "height": 6,
+                        "source_size": path.stat().st_size,
+                    },
+                )
+                self.assertEqual(
+                    hashlib.sha256(base64.b64decode(image.data)).hexdigest(),
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+
+    def test_visual_rejects_unsafe_paths(self):
+        with self.assertRaisesRegex(ValueError, "Local artifact path is not allowed"):
+            self.mod.read_local_visual("/var/tmp/image.png")
+        path = self.write_image("nested/image.png")
+        file_link = self.root / "link.png"
+        file_link.symlink_to(path)
+        directory_link = self.root / "linked"
+        directory_link.symlink_to(path.parent, target_is_directory=True)
+        self.write_image("repo/image.png")
+        self.write("worktree/.git", b"gitdir: /some/gitdir\n")
+        self.mod.DENY_PATTERNS.append("**/custom-denied.png")
+        for name in (
+            str(self.root / "nested" / ".." / "image.png"),
+            str(file_link),
+            str(directory_link / path.name),
+            str(self.write_image(".hidden/image.png")),
+            str(self.write_image("credentials/image.png")),
+            str(self.write_image("custom-denied.png")),
+            str(self.repo / "image.png"),
+            str(self.write_image("worktree/image.png")),
+        ):
+            with self.subTest(path=name), self.assertRaises(ValueError):
+                self.mod.read_local_visual(name)
+        hardlink = self.root / "hardlink.png"
+        hardlink.hardlink_to(path)
+        with self.assertRaises(ValueError):
+            self.mod.read_local_visual(str(hardlink))
+
+    def test_visual_animated_image_returns_first_frame(self):
+        path = self.root / "animated.png"
+        first = Image.new("RGBA", (8, 6), (12, 34, 56, 78))
+        second = Image.new("RGBA", first.size, "blue")
+        first.save(path, save_all=True, append_images=[second])
+        metadata, image = self.mod.read_local_visual(str(path))
+        self.assertEqual(json.loads(metadata.text)["frame"], 1)
+        self.assertEqual(image.mimeType, "image/png")
+        with Image.open(io.BytesIO(base64.b64decode(image.data))) as frame:
+            self.assertEqual(getattr(frame, "n_frames", 1), 1)
+            self.assertEqual(frame.getpixel((0, 0)), (12, 34, 56, 78))
+
+    def test_visual_rejects_foreign_owner(self):
+        path = self.write_image("nested/image.png")
+        real_fstat = os.fstat
+        for foreign_path in (path, path.parent):
+            target = foreign_path.stat()
+
+            def foreign_stat(fd, target=target):
+                info = real_fstat(fd)
+                if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                    return SimpleNamespace(st_mode=info.st_mode, st_uid=info.st_uid + 1)
+                return info
+
+            with (
+                self.subTest(path=foreign_path),
+                patch.object(self.mod.os, "fstat", side_effect=foreign_stat),
+                self.assertRaises(ValueError),
+            ):
+                self.mod.read_local_visual(str(path))
+
+    def test_visual_rejects_fake_mismatched_and_damaged_images(self):
+        jpeg = self.write_image("valid.jpg", "JPEG").read_bytes()
+        png = self.write_image("valid.png").read_bytes()
+        webp = self.write_image("valid.webp", "WEBP").read_bytes()
+        for name, data in (
+            ("fake.png", b"\x89PNG\r\n\x1a\nnot a real PNG"),
+            ("wrong.png", jpeg),
+            ("broken.png", png[:-15]),
+            ("broken.jpg", jpeg[:-10]),
+            ("broken.webp", webp[:-10]),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.mod.read_local_visual(str(self.write(name, data)))
+
+    def test_visual_enforces_byte_pixel_and_decompression_limits(self):
+        path = self.write_image("image.png", size=(20, 20))
+        for key, limit in (
+            ("max_visual_file_bytes", path.stat().st_size - 1),
+            ("max_visual_image_bytes", path.stat().st_size - 1),
+            ("max_render_pixels", 399),
+        ):
+            with (
+                self.subTest(limit=key),
+                patch.dict(self.mod.LIMITS, {key: limit}),
+                self.assertRaises(ValueError),
+            ):
+                self.mod.read_local_visual(str(path))
+        for pillow_limit in (399, 100):
+            with (
+                self.subTest(pillow_limit=pillow_limit),
+                patch.object(Image, "MAX_IMAGE_PIXELS", pillow_limit),
+                self.assertRaises(ValueError),
+            ):
+                self.mod.read_local_visual(str(path))
+
+    def test_visual_opened_descriptor_survives_path_replacement(self):
+        victim = self.write_image("replacement.png", size=(2, 3))
+        real_fstat = os.fstat
+        for symlink in (False, True):
+            path = self.write_image(f"original-{symlink}.png")
+            original = path.stat()
+            original_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+
+            def swap_after_fstat(fd, path=path, original=original, symlink=symlink):
+                info = real_fstat(fd)
+                if (info.st_dev, info.st_ino) == (original.st_dev, original.st_ino):
+                    path.unlink()
+                    if symlink:
+                        path.symlink_to(victim)
+                    else:
+                        path.write_bytes(victim.read_bytes())
+                return info
+
+            with (
+                self.subTest(symlink=symlink),
+                patch.object(self.mod.os, "fstat", side_effect=swap_after_fstat),
+            ):
+                metadata, image = self.mod.read_local_visual(str(path))
+                self.assertEqual(json.loads(metadata.text)["width"], 8)
+                self.assertEqual(
+                    hashlib.sha256(base64.b64decode(image.data)).hexdigest(),
+                    original_digest,
+                )
+                self.assertEqual(path.is_symlink(), symlink)
+
+    def test_visual_disabled(self):
+        path = self.write_image("image.png")
+        mod = self._import_server(self.config + "local_artifacts:\n  enabled: false\n")
+        with self.assertRaisesRegex(ValueError, "Local artifact access is disabled"):
+            mod.read_local_visual(str(path))
 
     def test_requested_paths(self):
         for name in ("REPORT.md", "PROPOSED-BINDING.json", "runtime/evidence.json"):
@@ -444,7 +614,7 @@ class LocalArtifactTests(unittest.TestCase):
             self.assertEqual(
                 {tool.name for tool in tools}, set(self.mod.EXPECTED_TOOLS)
             )
-            self.assertEqual(len(tools), 12)
+            self.assertEqual(len(tools), 13)
             tool = next(tool for tool in tools if tool.name == "read_local_artifact")
             self.assertEqual(tool.inputSchema["required"], ["path"])
             self.assertEqual(

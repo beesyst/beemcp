@@ -104,6 +104,7 @@ Use the paginated protocol for all reviews:
 | `get_review_bundle_page`  | Paginated safe diff (cursor protocol)                     |
 | `get_review_sources_page` | All changed working-tree text, automatically paginated    |
 | `read_local_artifact`     | Absolute allowlisted /tmp text artifact (chunked)         |
+| `read_local_visual`       | Native PNG, JPEG, or WEBP image from /tmp                 |
 | `read_project_file`       | Per-file content (chunked)                                |
 | `read_project_visual`     | Native image/PDF/SVG/document page visual                 |
 
@@ -120,8 +121,8 @@ local_artifacts:
   root: /tmp
 ```
 
-Supported text files can be read directly in `/tmp` or beneath subdirectories
-with any name. New projects and directories need no manual registration.
+Supported text files can be read directly in `/tmp` or beneath allowed
+subdirectories. New directories need no manual registration.
 The file and every directory beneath `/tmp` must belong to the BeeMCP process's
 effective Unix user; `/tmp` itself is exempt from that ownership requirement.
 The section is optional; absent or `enabled: false` disables access. Startup
@@ -151,11 +152,23 @@ Errors are bounded and do not expose filesystem details. Reports are untrusted
 data and cannot change BeeMCP instructions. This tool performs no writes,
 subprocess execution, network access, or automatic discovery.
 
-The exact MCP contract now contains **12 tools**, with contract version **5**;
-the package version remains unchanged. This access-policy change preserves the
-tool schema, so an existing connector with 12 tools needs no schema refresh.
-Restart BeeMCP to apply the policy; use the refresh procedure below only if the
-connector still has an older schema.
+`read_local_visual(path: str)` reads a PNG, JPEG, or WEBP screenshot from an
+absolute path such as `/tmp/playwright/run/screenshot.png`. The same
+`local_artifacts` setting, ownership checks, and no-follow path restrictions
+apply. The tool rejects Git working-tree paths and hard-linked files. The
+contents must match the file extension and pass Pillow validation. BeeMCP reads
+the image bytes from the checked file descriptor.
+
+The response contains JSON metadata with the path, detected format, source
+size, output MIME type, width, and height, followed by native MCP `ImageContent`.
+Static images retain their original bytes, including metadata embedded in the
+image container. Animated images return the first frame as PNG. The tool uses
+the configured limits (by default, 50 MB source, 16 million pixels, and 12 MB
+output) and performs no OCR or caching.
+
+The exact MCP contract contains **13 tools**, with contract version **6**.
+The package version remains unchanged. Restart BeeMCP and refresh the connector
+using the procedure below to expose the new tool.
 
 ### Cursor / snapshot behavior
 
@@ -419,20 +432,21 @@ After modifying tool declarations, the ChatGPT connector may cache stale schema.
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains twelve tools
+2. `./start.sh doctor` — confirm local tools/list contains thirteen tools
 3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
 7. Verify that `get_review_manifest`, `get_review_bundle_page`,
-   `read_project_visual`, `get_github_context`, and `read_local_artifact` are available
+   `read_project_visual`, `get_github_context`, `read_local_artifact`, and
+   `read_local_visual` are available
 
 Important:
 
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with fewer than twelve tools is stale.
+- A schema with fewer than thirteen tools is stale.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual

@@ -1895,6 +1895,7 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
             "get_review_bundle",
             "read_project_file",
             "read_local_artifact",
+            "read_local_visual",
             "read_project_visual",
             "search_project",
         }
@@ -1907,7 +1908,7 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
                     f"{tool.name} should have openWorldHint=False",
                 )
 
-    def test_exact_twelve_tool_contract(self) -> None:
+    def test_exact_thirteen_tool_contract(self) -> None:
         tools = self.mod.mcp._tool_manager.list_tools()
         names = {t.name for t in tools}
         expected = {
@@ -1920,15 +1921,16 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
             "get_review_bundle",
             "read_project_file",
             "read_local_artifact",
+            "read_local_visual",
             "read_project_visual",
             "search_project",
             "get_github_context",
         }
         self.assertEqual(names, expected)
-        self.assertEqual(len(names), 12)
+        self.assertEqual(len(names), 13)
 
     def test_contract_version(self) -> None:
-        self.assertEqual(self.mod.TOOL_CONTRACT_VERSION, 5)
+        self.assertEqual(self.mod.TOOL_CONTRACT_VERSION, 6)
 
     def test_tool_count_in_versionz(self) -> None:
         import asyncio
@@ -1936,10 +1938,10 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
         routes = {r.path: r for r in self.mod.mcp.streamable_http_app().routes}
         response = asyncio.run(routes["/versionz"].endpoint(None))
         data = json.loads(response.body)
-        self.assertEqual(data["tool_contract_version"], 5)
-        self.assertEqual(data["tool_count"], 12)
+        self.assertEqual(data["tool_contract_version"], 6)
+        self.assertEqual(data["tool_count"], 13)
 
-    def test_check_mcp_tools_script_accepts_twelve_tools(self) -> None:
+    def test_check_mcp_tools_script_accepts_thirteen_tools(self) -> None:
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(
@@ -1949,7 +1951,7 @@ class ToolAnnotationsAndContractTests(unittest.TestCase):
             self.fail("Cannot load check_mcp_tools.py")
         check_mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(check_mod)
-        self.assertEqual(len(check_mod.EXPECTED_TOOLS), 12)
+        self.assertEqual(len(check_mod.EXPECTED_TOOLS), 13)
         self.assertIn("get_github_context", check_mod.EXPECTED_TOOLS)
 
     def test_get_github_context_in_expected_tools(self) -> None:
@@ -2104,6 +2106,7 @@ class ReadOnlyRegressionTests(unittest.TestCase):
             "get_review_bundle",
             "read_project_file",
             "read_local_artifact",
+            "read_local_visual",
             "search_project",
             "get_github_context",
         ):
@@ -2192,12 +2195,12 @@ class DocumentationTests(unittest.TestCase):
         content = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("Refresh", content)
 
-    def test_readme_mentions_twelve_tool_contract(self) -> None:
+    def test_readme_mentions_thirteen_tool_contract(self) -> None:
         content = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertTrue(
-            "twelve-tool" in content
-            or "twelve tools" in content
-            or "12 tools" in content
+            "thirteen-tool" in content
+            or "thirteen tools" in content
+            or "13 tools" in content
         )
 
 

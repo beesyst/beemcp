@@ -995,8 +995,8 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(data["service"], "beemcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
-        self.assertEqual(data["tool_contract_version"], 5)
-        self.assertEqual(data["tool_count"], 12)
+        self.assertEqual(data["tool_contract_version"], 6)
+        self.assertEqual(data["tool_count"], 13)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -3925,24 +3925,30 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 12)
+        self.assertEqual(len(tools), 13)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
     def test_review_cursor_round_trip_uses_streamable_http_transport(self) -> None:
         import socket
 
-        from PIL import Image
         import uvicorn
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
+        from mcp.types import ImageContent, TextContent
+        from PIL import Image
 
         if TMP_ROOT is None:
             self.skipTest("no writable temporary storage")
         server: uvicorn.Server | None = None
         thread: threading.Thread | None = None
-        with tempfile.TemporaryDirectory(dir=TMP_ROOT) as temp:
+        with (
+            tempfile.TemporaryDirectory(dir=TMP_ROOT) as temp,
+            tempfile.NamedTemporaryFile(dir="/tmp", suffix=".png") as local_image,
+        ):
             root = Path(temp)
+            Image.new("RGB", (10, 7), "blue").save(local_image, format="PNG")
+            local_image.flush()
             repo = root / "review-repo"
             repo.mkdir()
             _run_git(["git", "init", "-b", "main"], repo)
@@ -3969,6 +3975,7 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                 "  max_search_results: 200\n"
                 "  max_review_page_chars: 100\n"
                 "deny_paths: []\n"
+                "local_artifacts:\n  enabled: true\n  root: /tmp\n"
                 "projects:\n"
                 f"  transport-proj:\n    source: {repo}\n    base_branch: main\n"
                 "    context_modes:\n      A:\n        files: []\n",
@@ -4084,7 +4091,9 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                                 )
                                 self.assertFalse(source.isError)
                                 data = dict(source.structuredContent or {})
-                                self.assertEqual(data["snapshot_id"], first_data["snapshot_id"])
+                                self.assertEqual(
+                                    data["snapshot_id"], first_data["snapshot_id"]
+                                )
                                 self.assertLessEqual(len(data["content"]), 100)
                                 source_parts.append(data["content"])
                                 skipped.extend(data["skipped_files"])
@@ -4092,12 +4101,16 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                                     break
                                 source_cursor = data["next_cursor"]
                             else:
-                                self.fail("Source transport cursor chain did not finish")
+                                self.fail(
+                                    "Source transport cursor chain did not finish"
+                                )
                             self.assertEqual(
                                 "".join(source_parts),
                                 (repo / "large.txt").read_text(encoding="utf-8"),
                             )
-                            self.assertEqual(skipped, [{"path": "visual.png", "reason": "visual"}])
+                            self.assertEqual(
+                                skipped, [{"path": "visual.png", "reason": "visual"}]
+                            )
                             return (
                                 first_data,
                                 dict(second.structuredContent or {}),
@@ -4128,6 +4141,52 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                         read_stream, write_stream, _ = streams
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
+                            listed = await session.list_tools()
+                            self.assertEqual(
+                                {tool.name for tool in listed.tools},
+                                set(module.EXPECTED_TOOLS),
+                            )
+                            local_tool = next(
+                                tool
+                                for tool in listed.tools
+                                if tool.name == "read_local_visual"
+                            )
+                            self.assertEqual(
+                                local_tool.inputSchema["required"], ["path"]
+                            )
+                            self.assertEqual(
+                                set(local_tool.inputSchema["properties"]), {"path"}
+                            )
+                            annotations = local_tool.annotations
+                            assert annotations is not None
+                            self.assertTrue(annotations.readOnlyHint)
+                            self.assertTrue(annotations.idempotentHint)
+                            self.assertFalse(annotations.destructiveHint)
+                            self.assertFalse(annotations.openWorldHint)
+                            local = await session.call_tool(
+                                "read_local_visual",
+                                arguments={"path": local_image.name},
+                            )
+                            self.assertFalse(local.isError)
+                            metadata, image = local.content
+                            assert isinstance(metadata, TextContent)
+                            assert isinstance(image, ImageContent)
+                            self.assertEqual(image.mimeType, "image/png")
+                            fields = json.loads(metadata.text)
+                            self.assertEqual(
+                                fields,
+                                {
+                                    "path": local_image.name,
+                                    "detected_format": "image/png",
+                                    "source_size": Path(local_image.name)
+                                    .stat()
+                                    .st_size,
+                                    "mime": "image/png",
+                                    "width": 10,
+                                    "height": 7,
+                                },
+                            )
+                            self.assertTrue(image.data)
                             result = await session.call_tool(
                                 "read_project_visual",
                                 arguments={

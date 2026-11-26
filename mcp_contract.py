@@ -13,12 +13,13 @@ EXPECTED_TOOLS = (
     "get_review_bundle",
     "read_project_file",
     "read_local_artifact",
+    "read_local_visual",
     "read_project_visual",
     "search_project",
     "get_github_context",
 )
 
-TOOL_CONTRACT_VERSION = 5
+TOOL_CONTRACT_VERSION = 6
 
 
 def tool_contract_fingerprint(tool_names: Iterable[str]) -> str:
