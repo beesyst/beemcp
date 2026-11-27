@@ -1,6 +1,6 @@
 # BeeMCP Read-Only Review
 
-ChatGPT read-only architecture and code review gateway through MCP.
+Architecture and code review gateway for ChatGPT over MCP, with optional isolated local pytest runs.
 
 ## Quick start
 
@@ -38,9 +38,8 @@ Use `./start.sh doctor` after the stack is up.
 
 ## Safety boundary
 
-- No file writes — all tools are read-only.
-- No agents — Copilot and Codex are never invoked.
-- No project checks — no tests, linters, or build commands are run.
+- The existing review tools retain their read-only contract.
+- The optional test runner executes only configured local pytest suites and keeps worker writes inside an isolated temporary filesystem.
 - No Git write operations — no commit, push, merge, branch switch, or reset.
 - Bounded read-only GitHub access — only `get_github_context` for allowlisted repositories; no Issue/PR creation, modification, comments, or any write operations.
 - Only allowlisted projects and their Git worktrees can be accessed.
@@ -166,9 +165,53 @@ image container. Animated images return the first frame as PNG. The tool uses
 the configured limits (by default, 50 MB source, 16 million pixels, and 12 MB
 output) and performs no OCR or caching.
 
-The exact MCP contract contains **13 tools**, with contract version **6**.
+The exact MCP contract contains **15 tools**, with contract version **7**.
 The package version remains unchanged. Restart BeeMCP and refresh the connector
-using the procedure below to expose the new tool.
+using the procedure below to expose the test tools.
+
+### Isolated local pytest
+
+The shipped `test_runner.enabled` is `true`. An operator can disable it in
+`config/projects.yml` and restart BeeMCP. Both tools appear in the MCP contract
+even when execution is disabled.
+
+1. Call `start_test_suite(target, suite)` with an allowed pair.
+2. Poll `get_test_result(job_id)` until the job reaches `passed`, `failed`,
+   `timeout`, or `refused`. Results include elapsed time, the process exit code
+   when available, pytest counts, failing allowlisted modules, and an output
+   truncation flag. Results are kept in memory for the last 32 jobs and expire on
+   restart.
+
+| Target | Suite | Coverage |
+| --- | --- | --- |
+| `beeagent` | `beeagent_conversation_web` | Selected conversation and web regression tests for read-only views, redaction, and scope enforcement |
+| `beeui` | `beeui_unit` | Blocks, locale, and navigation |
+| `beescan` | `beescan_unit` | Catalog and domain |
+| `beemcp` | `beemcp_unit` | BeeMCP review, local artifacts, GitHub mocks, lifecycle, and MCP transport |
+
+Each suite uses its declared main repository. The job has an opaque
+`snapshot_id` and reports `snapshot_sha256` once its source snapshot is ready.
+The snapshot includes allowed tracked and non-ignored untracked files from the
+current working tree. It skips hidden paths, private paths, symlinks and hard
+links, with explicit exceptions for the public `.env.example` and `.gitignore`.
+Editable dependencies use source snapshots at their existing absolute paths.
+Keep credentials and other private data out of source files.
+
+The runner requires Linux, rootless Bubblewrap with private mount, PID and network
+namespaces, libseccomp, a local systemd user manager with cgroup v2, and the
+existing Python 3.14 virtual environments. When BeeMCP's virtual environment
+lacks pytest, it uses the installed pytest modules from BeeUI's virtual
+environment. The runner never installs dependencies. Source snapshots and the
+allowlisted runtime mounts are read-only. The test process receives a fresh
+environment and can write to a size-limited tmpfs. The network namespace only
+has loopback, which BeeMCP uses to test its local HTTP transport. A failed
+sandbox check returns `refused` without running pytest on the host.
+
+One job may run at a time. Additional starts return `refused` with reason
+`busy`. Suite timeouts cap runtime at 180 seconds. CPU, memory and process
+limits apply to the whole cgroup, with additional per-process file size and
+descriptor limits and a bounded output buffer. The MCP response contains
+structured diagnostics and omits raw stdout, stderr and tracebacks.
 
 ### Cursor / snapshot behavior
 
@@ -432,21 +475,21 @@ After modifying tool declarations, the ChatGPT connector may cache stale schema.
 Exact sequence to propagate changes:
 
 1. `./start.sh restart`
-2. `./start.sh doctor` — confirm local tools/list contains thirteen tools
+2. Run `./start.sh doctor` and confirm the local contract contains 15 tools
 3. Open the BeeMCP app settings in ChatGPT
 4. Click **Refresh** for actions/tools
 5. Confirm the updated contract is shown
 6. Start a new chat
 7. Verify that `get_review_manifest`, `get_review_bundle_page`,
    `read_project_visual`, `get_github_context`, `read_local_artifact`, and
-   `read_local_visual` are available
+   `read_local_visual`, `start_test_suite`, and `get_test_result` are available
 
 Important:
 
 - `doctor` checks localhost and tunnel process state, **not** the client-side
   ChatGPT snapshot.
 - `get_review_bundle` cannot replace paginated review tools.
-- A schema with fewer than thirteen tools is stale.
+- A schema with fewer than 15 tools is stale.
 - BeeAgent prompts and skills must not be relaxed because of a stale connector
   schema.
 - The server cannot automatically update the ChatGPT connector — manual

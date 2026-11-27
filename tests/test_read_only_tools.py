@@ -912,9 +912,10 @@ class ReadOnlyToolsTests(unittest.TestCase):
                 ToolAnnotations,
                 f"Tool {t.name} annotations is not ToolAnnotations",
             )
-            self.assertTrue(
+            self.assertEqual(
                 t.annotations.readOnlyHint,
-                f"Tool {t.name} is not read-only",
+                t.name != "start_test_suite",
+                f"Unexpected read-only hint on {t.name}",
             )
             self.assertFalse(
                 t.annotations.destructiveHint,
@@ -995,8 +996,8 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(data["service"], "beemcp")
         self.assertIsInstance(data["git_head"], str)
         self.assertTrue(len(data["git_head"]) > 0)
-        self.assertEqual(data["tool_contract_version"], 6)
-        self.assertEqual(data["tool_count"], 13)
+        self.assertEqual(data["tool_contract_version"], 7)
+        self.assertEqual(data["tool_count"], 15)
         self.assertEqual(
             data["tool_contract_sha256"],
             mod.tool_contract_fingerprint(mod.EXPECTED_TOOLS),
@@ -1016,7 +1017,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertNotIn("tunnel", serialized.lower())
         self.assertNotIn("env", serialized.lower())
 
-    def test_mcp_tools_list_contains_exactly_ten_expected(self) -> None:
+    def test_mcp_tools_list_contains_exactly_expected(self) -> None:
         repo = self._init_repo("tools_count")
         self._commit_file(repo, "f.txt", "x")
         config = self._make_project_yml(
@@ -3925,7 +3926,7 @@ class ReadOnlyToolsTests(unittest.TestCase):
         self.assertEqual(mod.MCP_PORT, 8765)
         # Verify tools still load correctly
         tools = mod.mcp._tool_manager.list_tools()
-        self.assertEqual(len(tools), 13)
+        self.assertEqual(len(tools), 15)
 
 
 class StreamableHttpIntegrationTests(unittest.TestCase):
@@ -4294,6 +4295,40 @@ class StreamableHttpIntegrationTests(unittest.TestCase):
                         async with ClientSession(read_stream, write_stream) as session:
                             await session.initialize()
                             result = await session.list_tools()
+                            tools = {tool.name: tool for tool in result.tools}
+                            for name, expected, read_only in (
+                                ("start_test_suite", {"target", "suite"}, False),
+                                ("get_test_result", {"job_id"}, True),
+                            ):
+                                tool = tools[name]
+                                self.assertEqual(
+                                    set(tool.inputSchema["properties"]), expected
+                                )
+                                self.assertFalse(
+                                    tool.inputSchema["additionalProperties"]
+                                )
+                                annotations = tool.annotations
+                                self.assertIsNotNone(annotations)
+                                assert annotations is not None
+                                self.assertEqual(annotations.readOnlyHint, read_only)
+                            extra = await session.call_tool(
+                                "start_test_suite",
+                                {
+                                    "target": "beemcp",
+                                    "suite": "beemcp_unit",
+                                    "command": "rejected",
+                                },
+                            )
+                            self.assertTrue(extra.isError)
+                            disabled = await session.call_tool(
+                                "start_test_suite",
+                                {"target": "beemcp", "suite": "beemcp_unit"},
+                            )
+                            self.assertFalse(disabled.isError)
+                            content = disabled.structuredContent
+                            self.assertIsNotNone(content)
+                            assert content is not None
+                            self.assertEqual(content["reason"], "test_runner_disabled")
                     return {tool.name for tool in result.tools}
 
                 names = asyncio.run(list_names())

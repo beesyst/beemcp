@@ -98,7 +98,10 @@ class StartScriptTests(unittest.TestCase):
             r"""#!/bin/sh
 echo "systemctl $*" >> "$CALL_LOG"
 case " $* " in
-  *" show-environment "*) [ "${FAIL_MANAGER:-0}" = 0 ] ;;
+  *" show-environment "*)
+    echo "SYNTHETIC_MANAGER_SECRET=never_print"
+    [ "${FAIL_MANAGER:-0}" = 0 ]
+    ;;
   *" is-active beemcp.service "*) [ "${FAIL_MCP_ACTIVE:-0}" = 0 ] ;;
   *" is-active beemcp-tunnel.service "*) [ "${FAIL_TUNNEL_ACTIVE:-0}" = 0 ] ;;
   *" status beemcp.service "*) [ "${FAIL_MCP_STATUS:-0}" = 0 ] ;;
@@ -129,7 +132,7 @@ case "$*" in
   *healthz*) [ "${FAIL_HEALTH:-0}" = 0 ] ;;
   *versionz*)
     [ "${FAIL_VERSIONZ:-0}" = 0 ] && \
-      echo '{"service":"beemcp","git_head":"abc123","tool_contract_version":6,"tool_count":13,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
+      echo '{"service":"beemcp","git_head":"abc123","tool_contract_version":7,"tool_count":15,"tool_contract_sha256":"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"}'
     [ "${FAIL_VERSIONZ:-0}" = 0 ]
     ;;
   *) exit 0 ;;
@@ -478,6 +481,7 @@ esac
         self.assertIn("service inactive: beemcp.service", output)
         self.assertIn("health endpoint unavailable", output)
         self.assertNotIn("sk-test", output)
+        self.assertNotIn("SYNTHETIC_MANAGER_SECRET", output)
         calls = self.calls()
         self.assertFalse(
             any(" start " in f" {call} " or " stop " in f" {call} " for call in calls)

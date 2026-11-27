@@ -614,7 +614,7 @@ class LocalArtifactTests(unittest.TestCase):
             self.assertEqual(
                 {tool.name for tool in tools}, set(self.mod.EXPECTED_TOOLS)
             )
-            self.assertEqual(len(tools), 13)
+            self.assertEqual(len(tools), 15)
             tool = next(tool for tool in tools if tool.name == "read_local_artifact")
             self.assertEqual(tool.inputSchema["required"], ["path"])
             self.assertEqual(

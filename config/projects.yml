@@ -20,6 +20,30 @@ local_artifacts:
   enabled: true
   root: /tmp
 
+test_runner:
+  enabled: true
+  suites:
+    beeagent_conversation_web:
+      target: beeagent
+      timeout_seconds: 90
+    beeui_unit:
+      target: beeui
+      timeout_seconds: 90
+    beescan_unit:
+      target: beescan
+      timeout_seconds: 90
+    beemcp_unit:
+      target: beemcp
+      timeout_seconds: 180
+  limits:
+    cpu_percent: 100
+    memory_mib: 768
+    processes: 64
+    file_mib: 16
+    temp_mib: 64
+    open_files: 256
+    output_bytes: 16384
+
 deny_paths:
   - ".env"
   - ".env.*"

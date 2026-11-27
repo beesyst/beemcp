@@ -468,7 +468,12 @@ def cmd_doctor() -> None:
             if not (settings.systemd_dir / unit).is_file():
                 problems.append(f"installed unit missing: {unit}")
     if available_commands["systemctl"]:
-        if command(["systemctl", "--user", "show-environment"], check=False).returncode:
+        if command(
+            ["systemctl", "--user", "show-environment"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        ).returncode:
             problems.append("systemd user manager unavailable")
         for service, label in ((MCP_SERVICE, "MCP"), (TUNNEL_SERVICE, "Tunnel")):
             if command(
