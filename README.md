@@ -1,30 +1,85 @@
 # BeeMCP
 
-**Read-only repository review and isolated test execution for ChatGPT via the Model Context Protocol (MCP).**
+**A secure, self-hosted MCP gateway for AI-assisted code review and isolated local testing.**
 
-BeeMCP gives ChatGPT controlled access to local Git repositories, code changes, documentation, review artifacts, and selected GitHub Issues and pull requests. It can also run a small allowlist of tests in an isolated sandbox **without granting write access to your source repositories**.
+BeeMCP connects ChatGPT to your local Git repositories, working trees, documentation, and GitHub context through the [Model Context Protocol (MCP)](https://modelcontextprotocol.io/).
+
+It enables AI-assisted development and code review **without granting the AI permission to edit source files, execute arbitrary shell commands, or modify Git repositories**.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A["ChatGPT / MCP Client"]
+    B["Secure MCP Tunnel"]
+    C["BeeMCP Gateway"]
+
+    D["Read-Only Review"]
+    E["Allowlisted Test Runner"]
+
+    F["Local Git Repositories"]
+    G["GitHub Issues & PRs"]
+    H["Local Artifacts"]
+
+    I["Isolated Test Worker"]
+    J["Structured Test Results"]
+
+    A <--> B
+    B <--> C
+
+    C --> D
+    C --> E
+
+    D --> F
+    D --> G
+    D --> H
+
+    E --> I
+    F -. "Read-only source snapshots" .-> I
+    I --> J
+    J --> C
+
+    subgraph Sandbox["Test Sandbox"]
+        I
+    end
+```
+
+**BeeMCP Gateway** exposes a controlled set of MCP tools.
+
+**Read-Only Review** provides access to configured repositories, Git changes, documentation, GitHub context, and local artifacts.
+
+**Test Runner** executes predefined pytest suites inside a restricted Bubblewrap sandbox with resource and network limits.
+
+**The AI can inspect code and request approved tests, but cannot modify the original repositories through BeeMCP.**
 
 ## Features
 
-- **Repository context:** configurable projects, A/B/C context modes, and Git worktree discovery.
-- **Reliable code review:** paginated Git inventory, diffs, and changed-file contents with snapshot consistency checks.
-- **Files and evidence:** bounded text reads, local `/tmp` reports, and selected images, PDFs, and office documents.
-- **GitHub context:** read-only access to Issues, PRs, reviews, and comments in allowlisted repositories.
-- **Optional test execution:** fixed pytest suites in a Bubblewrap sandbox, with resource limits and structured results.
-- **No code edits:** no shell access, file-writing API, Git mutations, or GitHub write operations.
+- **Repository context** — configurable projects, context modes, and Git worktree discovery.
+- **Code review** — paginated Git inventory, diffs, and changed-source inspection.
+- **Snapshot consistency** — detection of changing repository state during reviews.
+- **GitHub integration** — read-only Issues, pull requests, reviews, and comments.
+- **Artifact inspection** — bounded text reports, screenshots, images, PDF pages, and supported Office previews.
+- **Isolated testing** — predefined pytest suites without arbitrary command execution.
+- **Security controls** — project allowlists, secret filtering, filesystem isolation, network restrictions, and resource limits.
 
-## Requirements
+BeeMCP is a review and verification gateway, not a general-purpose remote terminal or autonomous coding agent.
 
-- Linux with `systemd --user`, Git, and curl.
-- Python **3.14.4** (the version required by `pyproject.toml`).
-- A working `tunnel-client` installation and credentials for its control plane; these are **not provided by this repository**.
-- [`uv`](https://docs.astral.sh/uv/) (automatically installed by `start.sh` if absent).
-- For the optional test runner: rootless Bubblewrap, libseccomp, systemd/cgroup v2, and existing Python environments with the required test dependencies.
-- Optional: LibreOffice (`soffice`) for Office document previews.
+## Quick Start
 
-> **Deployment note:** BeeMCP is a self-hosted gateway, not a hosted ChatGPT service. The included deployment workflow depends on an externally configured MCP tunnel. A public clone alone does not grant tunnel or ChatGPT connector access.
+### Requirements
 
-## Quick start
+- Linux with `systemd --user`
+- Python **3.14.4**
+- Git and curl
+- [uv](https://docs.astral.sh/uv/) — automatically bootstrapped if missing
+- A configured `tunnel-client` and its control-plane credentials
+- A ChatGPT environment supporting the provisioned MCP connection
+
+For isolated testing, the host additionally requires rootless Bubblewrap, libseccomp, systemd/cgroup v2, and existing Python environments containing the necessary test dependencies.
+
+LibreOffice (`soffice`) is optional for supported Office document previews.
+
+### Installation
 
 ```bash
 git clone https://github.com/beesyst/beemcp.git
@@ -32,7 +87,9 @@ cd beemcp
 ./start.sh
 ```
 
-On first launch, the script creates a private `.env` from `.env.example` and reports missing configuration values. Edit `.env` and supply:
+On first launch, BeeMCP creates `.env` from `.env.example` and reports missing configuration values.
+
+Configure your credentials:
 
 ```dotenv
 BEEMCP_TUNNEL_ID=your-tunnel-id
@@ -40,136 +97,194 @@ CONTROL_PLANE_API_KEY=your-control-plane-key
 BEEMCP_GITHUB_TOKEN=your-read-only-github-token
 ```
 
-Other host, port, tunnel profile, and control-plane URL defaults are provided by `.env.example`. Configure the project paths in `config/projects.yml` for your machine, then start and verify:
+Adjust the project paths in `config/projects.yml`, then start and verify the stack:
 
 ```bash
 ./start.sh
 ./start.sh doctor
 ```
 
-A healthy local installation reports **15 MCP tools, contract v7**, and active MCP and tunnel services. This check does **not** verify whether ChatGPT has refreshed the connector schema.
+A healthy installation reports **15 MCP tools**, contract **v7**, and active MCP and tunnel services.
 
-## Configure projects
+> **Deployment requirement:** The tunnel client, its credentials, and ChatGPT connector provisioning are external prerequisites. Cloning BeeMCP does not automatically provide tunnel access or a connected ChatGPT app.
 
-Projects, accessible files, GitHub repositories, and limits are defined in `config/projects.yml`. Paths in `source` are relative to that configuration file.
+## Configuration
 
-Example project entry (add it under the existing `projects:` mapping):
-
-```yaml
-myproject:
-  source: ../../my-project
-  base_branch: main
-  github_repo: example-org/my-project # optional
-  context_modes:
-    A:
-      files: [README.md, docs/ARCHITECTURE.md]
-    B:
-      extends: A
-      files: [src, tests]
-    C:
-      extends: B
-      tree_roots: [src, tests]
-```
-
-- **A:** architecture, policies, and high-level documentation.
-- **B:** A plus implementation files and relevant contracts.
-- **C:** B plus a bounded repository tree.
-
-The gateway discovers both main repositories and linked Git worktrees. It resolves exact worktree identity before review; it does not infer a target from a branch name.
-
-### GitHub permissions
-
-Create a [fine-grained GitHub token](https://github.com/settings/tokens?type=beta) limited to the configured repositories, with **read-only** permissions for metadata, Issues, and pull requests. Put it only in `.env`; never commit secrets.
-
-## Available MCP tools
-
-| Area                 | Tools                                                                                                                |
-| -------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Projects             | `list_projects`, `list_worktrees`, `get_project_context`                                                             |
-| Review               | `get_review_manifest`, `get_review_bundle_page`, `get_review_sources_page`, `get_review_bundle` (bounded legacy API) |
-| Source and artifacts | `read_project_file`, `read_local_artifact`, `read_local_visual`, `read_project_visual`, `search_project`             |
-| GitHub               | `get_github_context`                                                                                                 |
-| Tests                | `start_test_suite`, `get_test_result`                                                                                |
-
-**15 tools · contract v7.** Review and reading tools are read-only. `start_test_suite` executes only configured tests in an isolated worker; it cannot accept arbitrary commands or paths.
-
-### Code review workflow
-
-For a complete review:
-
-1. Use `list_worktrees` to identify the exact target and branch.
-2. Read all pages from `get_review_manifest(target, mode, cursor="")` and assemble the JSON inventory.
-3. Read all pages from `get_review_bundle_page` using each returned `next_cursor`.
-4. Read all pages from `get_review_sources_page` to inspect changed and untracked text.
-5. Verify matching `snapshot_id` values; investigate `skipped_files` and incomplete coverage.
-
-A changed snapshot invalidates its cursors. Restart the review rather than combining results from different revisions. `get_review_bundle` is a **bounded compatibility API**, not a substitute for paginated review.
-
-### Local artifacts and visual inspection
-
-- `read_local_artifact`: allowlisted text files under `/tmp` (`.md`, `.json`, `.txt`, `.log`, `.csv`, `.tsv`, `.lean`).
-- `read_local_visual`: validated PNG, JPEG, and WEBP screenshots under `/tmp`.
-- `read_project_visual`: selected images and pages/crops from PDF or supported office files.
-
-Reads are size-bounded and enforce path, ownership, file-type, and symlink checks. Visual tools return native MCP image data; they do not perform OCR. Office rendering requires a local `soffice` executable.
-
-## Isolated test runner
-
-The current configuration enables the runner (`test_runner.enabled: true`). Set it to `false` in `config/projects.yml` to disable execution; the tools remain discoverable but refuse starts.
-
-| Target     | Suite                       | Scope                                        |
-| ---------- | --------------------------- | -------------------------------------------- |
-| `beeagent` | `beeagent_conversation_web` | Selected conversation and Web UI regressions |
-| `beeui`    | `beeui_unit`                | Blocks, locale, navigation                   |
-| `beescan`  | `beescan_unit`              | Catalog and domain                           |
-| `beemcp`   | `beemcp_unit`               | Gateway and transport regressions            |
-
-Usage:
-
-1. Call `start_test_suite(target, suite)` with an allowlisted pair.
-2. Poll `get_test_result(job_id)` until completion.
-3. Inspect `state`, `exit_code`, test counts, and bounded diagnostic fields.
-
-Only one test job runs at a time. Jobs have timeouts and CPU, memory, process, file, and output limits. The runner copies eligible working-tree sources—including permitted dirty and untracked files—into **read-only snapshots**; writable scratch space is limited to sandbox storage. It exposes neither arbitrary host files nor external network routes. On sandbox failure, execution is refused rather than falling back to host pytest.
-
-**These are selected suites, not full project test coverage.** No external security labs or unrestricted network tests are exposed through BeeMCP.
-
-## Connect to ChatGPT
-
-After starting BeeMCP, configure or refresh the BeeMCP MCP app/connector in your ChatGPT workspace using your provisioned tunnel connection.
-
-When the tool schema changes:
-
-1. Run `./start.sh restart` and `./start.sh doctor`.
-2. Open the BeeMCP app/connector settings in ChatGPT.
-3. Refresh its actions/tools, or reconnect if refresh is unavailable.
-4. Start a new chat and verify `start_test_suite` and `get_test_result` are visible.
-
-`doctor` validates the **local** MCP endpoint and tool contract. It cannot validate ChatGPT's cached connector schema.
-
-Example requests:
+Projects and access limits are managed through:
 
 ```text
-Use BeeMCP to review the current changes in myproject (mode B).
-Check the complete manifest, diff and changed sources. Do not edit files.
+config/projects.yml
 ```
+
+Example project registration:
+
+```yaml
+projects:
+  myproject:
+    source: ../../myproject
+    base_branch: main
+    github_repo: my-org/myproject
+
+    context_modes:
+      A:
+        files:
+          - README.md
+          - docs/ARCHITECTURE.md
+
+      B:
+        extends: A
+        files:
+          - src
+          - tests
+
+      C:
+        extends: B
+        tree_roots:
+          - src
+          - tests
+```
+
+Project paths are resolved relative to `config/projects.yml`.
+
+### Context Modes
+
+| Mode  | Purpose                                        |
+| ----- | ---------------------------------------------- |
+| **A** | Architecture, policies, and key documentation  |
+| **B** | Mode A plus implementation files and contracts |
+| **C** | Mode B plus a bounded repository tree          |
+
+Git worktrees are discovered automatically. BeeMCP verifies the exact repository, path, branch, and HEAD rather than relying on branch names alone.
+
+GitHub access requires a fine-grained token with read-only permissions for the selected repositories. Keep credentials in `.env`, never in source control.
+
+## MCP Tools
+
+BeeMCP exposes **15 tools** across five areas.
+
+| Area              | Tools                                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------- |
+| Projects          | `list_projects`, `list_worktrees`, `get_project_context`                                                 |
+| Review            | `get_review_manifest`, `get_review_bundle_page`, `get_review_sources_page`, `get_review_bundle`          |
+| Files & artifacts | `read_project_file`, `search_project`, `read_local_artifact`, `read_local_visual`, `read_project_visual` |
+| GitHub            | `get_github_context`                                                                                     |
+| Testing           | `start_test_suite`, `get_test_result`                                                                    |
+
+`get_review_bundle` is a bounded compatibility API. Full reviews should use the paginated review tools.
+
+### Example: Code Review
+
+Ask ChatGPT:
+
+```text
+Use BeeMCP to review the current changes in myproject.
+
+Verify the branch, inspect the complete Git inventory,
+review changed sources and public contracts,
+and identify defects or missing verification.
+
+Do not modify files.
+```
+
+For a complete review, BeeMCP provides a consistent snapshot across the manifest, diff, and changed-source pages. If the repository changes during inspection, the review must restart using a new snapshot.
+
+### Example: Local Testing
 
 ```text
 Use BeeMCP to run the allowlisted beeui_unit suite.
-Report the exit code, passed, failed and skipped counts. Do not edit files.
+
+Report the exit code, passed, failed, skipped,
+and any available diagnostic information.
+
+Do not modify source files.
 ```
+
+The MCP client can request a predefined suite and retrieve its status and results. It cannot supply arbitrary shell commands, executable paths, or pytest arguments.
+
+## Isolated Test Runner
+
+BeeMCP supports an optional, strictly allowlisted test runner.
+
+Current configured suites:
+
+| Project  | Suite                       | Coverage                                     |
+| -------- | --------------------------- | -------------------------------------------- |
+| BeeAgent | `beeagent_conversation_web` | Selected conversation and Web UI regressions |
+| BeeUI    | `beeui_unit`                | Blocks, locale, navigation                   |
+| BeeScan  | `beescan_unit`              | Catalog and domain                           |
+| BeeMCP   | `beemcp_unit`               | Gateway and transport regressions            |
+
+Enable or disable execution in `config/projects.yml`:
+
+```yaml
+test_runner:
+  enabled: true
+```
+
+The provided configuration enables these suites. Set `enabled: false` to disable execution while retaining the MCP tool declarations.
+
+### Execution Model
+
+1. `start_test_suite(target, suite)` requests an allowed test suite.
+2. BeeMCP prepares a bounded snapshot of eligible source files.
+3. A sandboxed worker executes the configured pytest tests.
+4. `get_test_result(job_id)` returns the job state and structured results.
+
+The sandbox uses:
+
+- Read-only source snapshots, including eligible uncommitted changes
+- Bubblewrap filesystem and network namespaces
+- Isolated writable temporary storage
+- systemd/cgroup CPU, memory, and process limits
+- Execution timeouts and bounded output
+- Restricted access to host files and environment variables
+
+Only one test job runs at a time.
+
+If the required isolation cannot be established, BeeMCP refuses the job rather than running pytest directly on the host.
+
+**Important:** These are selected regression suites, not full project test coverage. External security laboratories and unrestricted network tests are not available through this interface.
+
+## Connect to ChatGPT
+
+Once BeeMCP and the configured tunnel are running, connect the MCP endpoint through the provisioned ChatGPT connector.
+
+After changing the MCP tool schema:
+
+1. Restart BeeMCP with `./start.sh restart`.
+2. Verify the server using `./start.sh doctor`.
+3. Refresh the BeeMCP connector's actions/tools in ChatGPT, or reconnect if refreshing is unavailable.
+4. Start a new chat.
+5. Confirm that `start_test_suite` and `get_test_result` are available.
+
+`doctor` validates the local MCP server and tool contract. It cannot verify that ChatGPT has refreshed its cached connector schema.
 
 ## Operations
 
+BeeMCP uses a single entrypoint:
+
 ```bash
-./start.sh setup    # Install/configure user services
-./start.sh           # Start the stack (default: up)
-./start.sh status    # Service and endpoint status
-./start.sh doctor    # Health, readiness, and MCP contract checks
-./start.sh logs      # Follow service logs
-./start.sh restart   # Restart MCP and tunnel
-./start.sh stop      # Stop both services
+./start.sh <command>
 ```
+
+| Command              | Description                                  |
+| -------------------- | -------------------------------------------- |
+| `./start.sh`         | Start the stack                              |
+| `./start.sh setup`   | Configure local services                     |
+| `./start.sh status`  | Check service status                         |
+| `./start.sh doctor`  | Validate health, readiness, and MCP contract |
+| `./start.sh logs`    | Follow service logs                          |
+| `./start.sh restart` | Restart MCP and tunnel                       |
+| `./start.sh stop`    | Stop the stack                               |
+
+The stack runs through two user-level systemd services:
+
+```text
+beemcp.service
+beemcp-tunnel.service
+```
+
+Health endpoints:
 
 | Endpoint    | Purpose                                 |
 | ----------- | --------------------------------------- |
@@ -177,26 +292,55 @@ Report the exit code, passed, failed and skipped counts. Do not edit files.
 | `/readyz`   | Readiness                               |
 | `/versionz` | Git HEAD and MCP tool-contract identity |
 
-The stack uses two `systemd --user` services: `beemcp.service` and `beemcp-tunnel.service`. Generated units and tunnel profiles should be managed through `start.sh`, not edited manually.
+Manage generated systemd units and tunnel configuration through `start.sh`, not by editing generated files manually.
 
-### Run the BeeMCP test suite
+## Development
+
+Run the BeeMCP test suite:
 
 ```bash
 uv run python -m unittest discover -s tests -v
 ```
 
-The gateway's own development tests use **unittest**. Its optional isolated test runner executes selected **pytest** suites in other project environments.
+BeeMCP's own development tests use `unittest`. The optional sandbox runner uses pytest from existing project environments to execute its predefined suites.
 
-## Security model
+Project structure:
 
-- **Read-only project access:** no APIs for file editing, shell execution, commits, pushes, merges, or branch changes.
-- **Strict allowlists:** project roots, GitHub repositories, local artifact types, and available test suites are explicit.
-- **Secret isolation:** `.env`, key files, private paths, and Git metadata are excluded from source snapshots; tunnel credentials are not passed to the MCP server process.
-- **Sandboxed execution:** Bubblewrap namespaces, read-only mounts, network isolation, and systemd/cgroup limits; failure is fail-closed.
-- **Untrusted inputs:** repository files, GitHub content, logs, and test output are treated as data, not instructions.
+```text
+beemcp/
+├── config/
+│   ├── projects.yml
+│   └── start.py
+├── ops/systemd/
+├── scripts/
+├── tests/
+├── server.py
+├── mcp_contract.py
+├── test_runner.py
+├── test_worker.py
+├── start.sh
+├── pyproject.toml
+└── uv.lock
+```
 
-The gateway is intended for trusted operators. As with any tool that can execute tests, review the configured suite allowlist and the host's sandbox capabilities before enabling it.
+## Security
+
+BeeMCP follows a **least-privilege, read-only-by-default design**.
+
+- No source editing, arbitrary shell execution, Git commits, pushes, merges, or branch changes through MCP.
+- GitHub operations are restricted to read-only context retrieval.
+- Project roots, accessible files, artifact formats, and executable test suites are explicitly constrained.
+- Secret files, private keys, and Git metadata are excluded from test snapshots.
+- Test execution runs inside an isolated environment, with no route to the external network.
+- Repository content, GitHub responses, artifacts, and test output are treated as untrusted input.
+- Test execution is a separate, explicitly limited capability; it is not equivalent to passive read-only access.
+
+Bubblewrap and resource limits reduce risk, but sandboxing does not eliminate all risks associated with executing untrusted test code. BeeMCP is intended for trusted operators who control the configured project and suite allowlists.
 
 ## License
 
-No license is declared in the repository yet. Add an appropriate `LICENSE` file before public release; a public GitHub repository does not automatically grant reuse rights.
+A license has not yet been declared. Add a `LICENSE` file before publishing BeeMCP as an open-source project.
+
+---
+
+**BeeMCP reads the code, verifies the changes, and runs approved tests — without giving AI control over your source repositories.**
