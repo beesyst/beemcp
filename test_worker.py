@@ -53,7 +53,7 @@ def main() -> int:
         sys.path.append("/pytest-deps")
     try:
         pytest_main = getattr(importlib.import_module("pytest"), "main")
-    except (ImportError, AttributeError):
+    except ImportError, AttributeError:
         print("BEEMCP_PYTHON_UNAVAILABLE", flush=True)
         return 125
 
